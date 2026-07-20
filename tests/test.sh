@@ -13,7 +13,7 @@ assert_not_contains() {
 }
 
 bash -n "$SCRIPT"
-[[ "$($SCRIPT --version)" == "tmux-room 0.2.1" ]] || fail "version should be 0.2.1"
+[[ "$($SCRIPT --version)" == "tmux-room 0.3.0" ]] || fail "version should be 0.3.0"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "device:room"
@@ -21,6 +21,8 @@ assert_contains "$help" "--kill"
 
 MOCK=$(mktemp -d)
 trap 'rm -rf "$MOCK"' EXIT
+export TMUX_ROOM_CONFIG_DIR="$MOCK/config"
+mkdir -p "$TMUX_ROOM_CONFIG_DIR"
 
 cat > "$MOCK/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -29,9 +31,15 @@ case "$1" in
   has-session) exit 0 ;;
   list-sessions)
     echo 'alpha|2|1|1700000000|1700003600|$1'
+    if [[ "${TMUX_TWO_ROOMS:-}" == "1" ]]; then
+      echo 'beta|1|0|1700000000|1700003600|$2'
+    fi
     ;;
   display-message)
-    display_id="${TMUX_REVALIDATE_ID:-\$1}"
+    display_name=alpha
+    display_default_id='$1'
+    case "$*" in *'=beta'*) display_name=beta; display_default_id='$2' ;; esac
+    display_id="${TMUX_REVALIDATE_ID:-$display_default_id}"
     if [[ -n "${TMUX_ID_COUNTER:-}" ]]; then
       count=0
       [[ -f "$TMUX_ID_COUNTER" ]] && read -r count < "$TMUX_ID_COUNTER"
@@ -41,7 +49,7 @@ case "$1" in
         display_id="$TMUX_SECOND_REVALIDATE_ID"
       fi
     fi
-    printf '%s|alpha\n' "$display_id"
+    printf '%s|%s\n' "$display_id" "$display_name"
     ;;
   list-panes)
     echo '4242|/work/knowledge-hub|node|review'
@@ -52,11 +60,16 @@ EOF
 
 cat > "$MOCK/python3" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${TMUX_ROOM_RESOURCE_SCAN:-}" == "1" && "${TMUX_ROOM_RESOURCE_REAL:-}" != "1" ]]; then
+if [[ "${TMUX_ROOM_SERVER_STATUS:-}" == "1" ]]; then
+  printf 'CPU 12%% load (0.96/8) · RAM 44%% (13.9/31.3 GB)\n'
+elif [[ "${TMUX_ROOM_AGENT_INVENTORY:-}" == "1" ]]; then
+  printf '$1\tclaude-fable5-low\n'
+  printf '$2\tclaude-fable5-low\n'
+elif [[ "${TMUX_ROOM_RESOURCE_SCAN:-}" == "1" && "${TMUX_ROOM_RESOURCE_REAL:-}" != "1" ]]; then
   printf '768\t3\n'
 elif [[ "${TMUX_ROOM_AGENT_SCAN:-}" == "1" ]]; then
-  printf 'Claude\tclaude-sonnet-4-6\t42m\t2026-07-20 01:00\n'
-  printf 'Codex\tgpt-5.6\t8m\t2026-07-20 01:34\n'
+  printf 'Claude\tfable5\t42m\t2026-07-20 01:00\tlow\n'
+  printf 'Codex\tgpt-5.6\t8m\t2026-07-20 01:34\tmedium\n'
 elif [[ "${TMUX_ROOM_FORMAT_DATE:-}" == "1" ]]; then
   case "$TMUX_ROOM_EPOCH" in
     1700000000) echo '2023-11-14 22:13' ;;
@@ -81,6 +94,12 @@ cat > "$MOCK/hostname" <<'EOF'
 echo devbox
 EOF
 
+cat > "$MOCK/curl" <<'EOF'
+#!/usr/bin/env bash
+[[ -n "${CURL_MOCK_LOG:-}" ]] && printf '%s\n' "$*" >> "$CURL_MOCK_LOG"
+printf '{"tag_name":"v9.9.9"}\n'
+EOF
+
 cat > "$MOCK/ssh" <<'EOF'
 #!/usr/bin/env bash
 [[ -n "${SSH_MOCK_LOG:-}" ]] && printf '%s\n' "$*" >> "$SSH_MOCK_LOG"
@@ -96,21 +115,30 @@ EOF
 chmod +x "$MOCK"/*
 
 TMUX_LOG="$MOCK/tmux.log"
+CURL_LOG="$MOCK/curl.log"
+update_output=$(printf 'q\n' | PATH="$MOCK:/usr/bin:/bin" CURL_MOCK_LOG="$CURL_LOG" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_contains "$update_output" "UPDATE: v9.9.9 available"
+assert_contains "$update_output" "tmux-room --update"
+printf 'q\n' | PATH="$MOCK:/usr/bin:/bin" CURL_MOCK_LOG="$CURL_LOG" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" >/dev/null
+[[ "$(wc -l < "$CURL_LOG" | tr -d ' ')" == "1" ]] || fail "update check should use its cache"
+
 output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
 assert_contains "$output" "DEVICE: devbox [local]"
+assert_contains "$output" "STATUS: CPU 12% load (0.96/8) · RAM 44% (13.9/31.3 GB)"
 assert_contains "$output" "#  ROOM"
+assert_contains "$output" "PROVIDER/MODEL"
+assert_contains "$output" "claude-fable5-low"
 assert_contains "$output" "alpha"
 assert_contains "$output" "attached"
 assert_contains "$output" "2023-11-14 23:13"
 assert_not_contains "$output" "AGENTS:"
 assert_not_contains "$output" "REPO:"
 assert_not_contains "$output" "SUMMED RSS SNAPSHOT:"
-assert_not_contains "$(<"$TMUX_LOG")" "list-panes"
 
 : > "$TMUX_LOG"
 picker_output=$(printf '1\nn\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT")
 assert_contains "$picker_output" "ROOM DETAILS"
-assert_contains "$picker_output" "AGENTS: Claude · claude-sonnet-4-6 · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · started 2026-07-20 01:34 · running 8m"
+assert_contains "$picker_output" "AGENTS: Claude · fable5 · effort low · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · effort medium · started 2026-07-20 01:34 · running 8m"
 assert_contains "$picker_output" "REPO: knowledge-hub"
 assert_contains "$picker_output" "SUMMED RSS SNAPSHOT: 768 MB · PROCESSES SNAPSHOT: 3"
 assert_contains "$picker_output" "Attach this room? [y/N]"
@@ -176,6 +204,11 @@ ID_COUNTER="$MOCK/id-counter"
 snapshot_race_output=$(printf 'alpha\nKILL\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ID_COUNTER="$ID_COUNTER" TMUX_SECOND_REVALIDATE_ID="\$2" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha || true)
 assert_contains "$snapshot_race_output" "Kill aborted: room identity changed during final snapshot"
 assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+: > "$TMUX_LOG"
+arrow_close_output=$(printf '\033[Bxbeta\nKILL\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_contains "$arrow_close_output" "Killed room: beta"
+assert_contains "$(<"$TMUX_LOG")" "kill-session -t \$2"
 
 : > "$SSH_LOG"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --kill mini:alpha >/dev/null
