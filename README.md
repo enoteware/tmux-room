@@ -6,10 +6,20 @@ Designed for SSH, Tailscale, Mosh, and mobile clients such as Termius.
 
 ## What it shows
 
-Every room is rendered as a narrow-terminal-friendly card:
+The default picker and `--list` stay compact, with one room per row:
 
 ```text
-DEVICE: mini [remote]
+DEVICE: mini [local]
+  #  ROOM                             STATE     WINDOWS  LAST ACTIVE
+  -- -------------------------------- --------- -------  ----------------
+  1  kh-review                        attached        2  2026-07-20 01:42
+  2  release-check                    detached        1  2026-07-20 00:18
+```
+
+Select a room in the interactive picker to reveal its full detail card before attaching:
+
+```text
+ROOM DETAILS
   ROOM: kh-review [attached] · 2 windows · #1
     AGENTS: Claude · claude-sonnet-4-6 · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · started 2026-07-20 01:34 · running 8m
     OPENED: 2026-07-20 00:55 · LAST ACTIVE: 2026-07-20 01:42
@@ -17,15 +27,16 @@ DEVICE: mini [remote]
     SUMMED RSS SNAPSHOT: 768 MB · PROCESSES SNAPSHOT: 3
     CONTEXT: unavailable (agent CLI does not expose it safely)
     PATH: /code/hub
+
+Attach this room? [Y/n]:
 ```
 
-- Device and local/remote status
-- Room name, attached state, and window count
-- Every active supported agent in the room
+- Compact room, state, window, and activity overview before selection
+- Every active supported agent after selection
 - Model when safely discoverable from process arguments or pane metadata
 - Agent start time and process running time
 - Room-opened and last-active timestamps
-- Repository, Git branch, and working path
+- Repository, Git branch, working path, and best-effort resource snapshot
 
 Unknown agents and models are labeled honestly rather than guessed.
 
@@ -44,8 +55,8 @@ export PATH="$HOME/bin:$PATH"
 ## Local usage
 
 ```bash
-tmux-room                 # interactive local picker
-tmux-room --list          # detailed local status
+tmux-room                 # compact picker; selection reveals details before attach
+tmux-room --list          # compact one-row-per-room table
 tmux-room --kill my-room  # inspect RAM/processes, then double-confirm termination
 tmux-room my-session      # attach locally
 tmux-room --version
