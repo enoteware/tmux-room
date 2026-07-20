@@ -300,6 +300,7 @@ session_details() {
 print_local_rooms() {
   local source_label="${1:-local}" device i name windows attached created activity session_id
   device=$(sanitize_text "$(get_device_name)")
+  source_label=$(sanitize_text "$source_label")
   printf 'DEVICE: %s [%s]\n' "$device" "$source_label"
   if ! tmux has-session 2>/dev/null; then
     echo '  No tmux rooms are running.'
@@ -412,7 +413,7 @@ print_all_devices() {
     fi
     [[ "$label" == "$(get_device_name)" ]] && continue
     echo
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" "TMUX_ROOM_DEVICE=$label tmux-room --list"; then
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" "TMUX_ROOM_DEVICE=$label TMUX_ROOM_SOURCE_LABEL=remote tmux-room --list"; then
       echo "DEVICE: $label [unreachable]"
     fi
   done < "$TMUX_ROOM_HOSTS_FILE"
@@ -496,7 +497,7 @@ require_local_dependencies
 
 case "${1:-}" in
   --all) print_all_devices; exit 0 ;;
-  --list|-l) print_local_rooms local; exit 0 ;;
+  --list|-l) print_local_rooms "${TMUX_ROOM_SOURCE_LABEL:-local}"; exit 0 ;;
   --kill)
     [[ $# -eq 2 ]] || { echo "Usage: tmux-room --kill <room|device:room>" >&2; exit 2; }
     kill_local_room "$2"

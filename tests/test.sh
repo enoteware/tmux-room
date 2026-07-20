@@ -84,7 +84,11 @@ EOF
 cat > "$MOCK/ssh" <<'EOF'
 #!/usr/bin/env bash
 [[ -n "${SSH_MOCK_LOG:-}" ]] && printf '%s\n' "$*" >> "$SSH_MOCK_LOG"
-echo 'DEVICE: mini [remote]'
+source_label=local
+case "$*" in
+  *TMUX_ROOM_SOURCE_LABEL=remote*) source_label=remote ;;
+esac
+printf 'DEVICE: mini [%s]\n' "$source_label"
 echo '  ROOM: remote-review [detached] · 1 window'
 echo '    AGENTS: Codex · gpt-5.6 · running 3m'
 EOF
@@ -105,13 +109,15 @@ assert_contains "$output" "SUMMED RSS SNAPSHOT: 768 MB · PROCESSES SNAPSHOT: 3"
 assert_contains "$output" "CONTEXT: unavailable"
 
 HOSTS="$MOCK/hosts"
+SSH_LOG="$MOCK/ssh.log"
 printf 'mini mini-host' > "$HOSTS"
-all_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --all)
+all_output=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --all)
 assert_contains "$all_output" "DEVICE: devbox [local]"
 assert_contains "$all_output" "DEVICE: mini [remote]"
 assert_contains "$all_output" "remote-review"
+assert_contains "$(<"$SSH_LOG")" "TMUX_ROOM_SOURCE_LABEL=remote"
 
-SSH_LOG="$MOCK/ssh.log"
+: > "$SSH_LOG"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" mini:alpha >/dev/null
 assert_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room alpha"
 
