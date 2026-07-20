@@ -13,7 +13,7 @@ assert_not_contains() {
 }
 
 bash -n "$SCRIPT"
-[[ "$($SCRIPT --version)" == "tmux-room 0.2.0" ]] || fail "version should be 0.2.0"
+[[ "$($SCRIPT --version)" == "tmux-room 0.2.1" ]] || fail "version should be 0.2.1"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "device:room"
@@ -98,15 +98,44 @@ chmod +x "$MOCK"/*
 TMUX_LOG="$MOCK/tmux.log"
 output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
 assert_contains "$output" "DEVICE: devbox [local]"
-assert_contains "$output" "ROOM: alpha [attached]"
-assert_contains "$output" "AGENTS: Claude · claude-sonnet-4-6 · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · started 2026-07-20 01:34 · running 8m"
-assert_contains "$(<"$TMUX_LOG")" "list-panes -s -t \$1"
-assert_contains "$output" "OPENED: 2023-11-14 22:13"
-assert_contains "$output" "LAST ACTIVE: 2023-11-14 23:13"
-assert_contains "$output" "REPO: knowledge-hub"
-assert_contains "$output" "BRANCH: feature/mobile-ui"
-assert_contains "$output" "SUMMED RSS SNAPSHOT: 768 MB · PROCESSES SNAPSHOT: 3"
-assert_contains "$output" "CONTEXT: unavailable"
+assert_contains "$output" "#  ROOM"
+assert_contains "$output" "alpha"
+assert_contains "$output" "attached"
+assert_contains "$output" "2023-11-14 23:13"
+assert_not_contains "$output" "AGENTS:"
+assert_not_contains "$output" "REPO:"
+assert_not_contains "$output" "SUMMED RSS SNAPSHOT:"
+assert_not_contains "$(<"$TMUX_LOG")" "list-panes"
+
+: > "$TMUX_LOG"
+picker_output=$(printf '1\nn\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_contains "$picker_output" "ROOM DETAILS"
+assert_contains "$picker_output" "AGENTS: Claude · claude-sonnet-4-6 · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · started 2026-07-20 01:34 · running 8m"
+assert_contains "$picker_output" "REPO: knowledge-hub"
+assert_contains "$picker_output" "SUMMED RSS SNAPSHOT: 768 MB · PROCESSES SNAPSHOT: 3"
+assert_contains "$picker_output" "Attach this room? [y/N]"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+printf '1\n\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" >/dev/null
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+printf '1\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" >/dev/null
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" alpha >/dev/null
+assert_contains "$(<"$TMUX_LOG")" "attach-session -t =alpha"
+
+: > "$TMUX_LOG"
+printf '1\ny\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" >/dev/null
+assert_contains "$(<"$TMUX_LOG")" "attach-session -t \$1"
+
+: > "$TMUX_LOG"
+attach_race_output=$(printf '1\ny\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_REVALIDATE_ID="\$2" TMUX_ROOM_DEVICE=devbox "$SCRIPT" || true)
+assert_contains "$attach_race_output" "Attachment aborted: room identity changed"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
 
 HOSTS="$MOCK/hosts"
 SSH_LOG="$MOCK/ssh.log"
@@ -165,7 +194,7 @@ assert_not_contains "$dirty_output" "$ESC"
 assert_not_contains "$dirty_output" "$C1"
 assert_not_contains "$dirty_output" "$BIDI"
 
-stale_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_RESOURCE_REAL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
+stale_output=$(printf '1\nn\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_RESOURCE_REAL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
 assert_contains "$stale_output" "SUMMED RSS SNAPSHOT: 0 MB · PROCESSES SNAPSHOT: 0"
 
 cat > "$MOCK/ps" <<'EOF'
@@ -173,7 +202,7 @@ cat > "$MOCK/ps" <<'EOF'
 exit 1
 EOF
 chmod +x "$MOCK/ps"
-unavailable_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_RESOURCE_REAL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
+unavailable_output=$(printf '1\nn\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_RESOURCE_REAL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
 assert_contains "$unavailable_output" "RESOURCE SNAPSHOT: unavailable"
 rm "$MOCK/ps"
 
