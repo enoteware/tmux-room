@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+      - name: ShellCheck
+        run: shellcheck bin/tmux-room install.sh tests/test.sh
+      - name: Tests
+        run: bash tests/test.sh

@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+TMUX_ROOM_VERSION="0.1.0"
+TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
+
+usage() {
+  cat <<'EOF'
+tmux-room — pick and attach to tmux rooms
+
+Usage:
+  tmux-room                  Interactive room picker
+  tmux-room <name>           Attach directly to a room
+  tmux-room --list           List rooms without attaching
+  tmux-room --version        Print the installed version
+  tmux-room --update         Update from the public GitHub repository
+  tmux-room --help           Show this help
+
+Detach from tmux with Ctrl-b then d.
+EOF
+}
+
+classify_cli() {
+  local session="$1" pane_pid
+  pane_pid=$(tmux list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+  [[ -n "$pane_pid" ]] || { printf 'unknown'; return; }
+
+  ROOT_PID="$pane_pid" python3 - <<'PY'
+import os
+import subprocess
+
+rows = []
+raw = subprocess.run(
+    ['ps', '-eo', 'pid=,ppid=,args='],
+    capture_output=True,
+    text=True,
+    check=False,
+).stdout
+for line in raw.splitlines():
+    parts = line.strip().split(None, 2)
+    if len(parts) == 3:
+        try:
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+        except ValueError:
+            pass
+
+root = int(os.environ['ROOT_PID'])
+children = {}
+for pid, ppid, arg in rows:
+    children.setdefault(ppid, []).append((pid, arg))
+
+queue = [root]
+seen = set()
+found = []
+while queue:
+    pid = queue.pop(0)
+    if pid in seen:
+        continue
+    seen.add(pid)
+    for child, arg in children.get(pid, []):
+        low = arg.lower()
+        if 'claude' in low and 'tmux-room' not in low:
+            found.append('Claude')
+        elif 'codex' in low:
+            found.append('Codex')
+        elif any(name in low for name in ('grok', 'xai')):
+            found.append('Grok')
+        queue.append(child)
+
+print(found[0] if found else 'shell')
+PY
+}
+
+format_age() {
+  local created="$1" now age d h m
+  now=$(date +%s)
+  age=$((now-created))
+  ((age < 0)) && age=0
+  d=$((age/86400))
+  h=$((age%86400/3600))
+  m=$((age%3600/60))
+  if ((d > 0)); then
+    printf '%dd %02dh' "$d" "$h"
+  elif ((h > 0)); then
+    printf '%dh %02dm' "$h" "$m"
+  else
+    printf '%dm' "$m"
+  fi
+}
+
+load_rows() {
+  rows=()
+  while IFS= read -r row; do
+    [[ -n "$row" ]] && rows+=("$row")
+  done < <(tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}' 2>/dev/null | sort -t'|' -k1,1)
+}
+
+print_rooms() {
+  local i name windows attached created marker cli age
+  for i in "${!rows[@]}"; do
+    IFS='|' read -r name windows attached created <<<"${rows[$i]}"
+    marker="  "
+    [[ "$attached" != "0" ]] && marker="* "
+    cli=$(classify_cli "$name")
+    age=$(format_age "$created")
+    printf '%2d) %s%-32s %-7s live %s\n' "$((i+1))" "$marker" "$name" "$cli" "$age"
+  done
+}
+
+self_update() {
+  local self tmp downloader
+  self="${BASH_SOURCE[0]}"
+  if [[ ! -w "$self" ]]; then
+    echo "Cannot update $self: file is not writable." >&2
+    echo "Re-run the installer or update it with the account that owns the file." >&2
+    exit 1
+  fi
+
+  tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-room.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  if command -v curl >/dev/null 2>&1; then
+    downloader=(curl -fsSL "$TMUX_ROOM_RAW_URL" -o "$tmp")
+  elif command -v wget >/dev/null 2>&1; then
+    downloader=(wget -qO "$tmp" "$TMUX_ROOM_RAW_URL")
+  else
+    echo "tmux-room update requires curl or wget." >&2
+    exit 1
+  fi
+
+  "${downloader[@]}"
+  bash -n "$tmp"
+  grep -q '^TMUX_ROOM_VERSION=' "$tmp"
+  chmod 755 "$tmp"
+  mv "$tmp" "$self"
+  trap - EXIT
+  echo "Updated tmux-room: $($self --version)"
+}
+
+case "${1:-}" in
+  --version|-V)
+    echo "tmux-room $TMUX_ROOM_VERSION"
+    exit 0
+    ;;
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --update)
+    self_update
+    exit 0
+    ;;
+esac
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "tmux-room requires tmux." >&2
+  exit 127
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "tmux-room requires python3 for agent detection." >&2
+  exit 127
+fi
+
+if ! tmux has-session 2>/dev/null; then
+  echo "No tmux rooms are running."
+  exit 0
+fi
+
+load_rows
+if ((${#rows[@]} == 0)); then
+  echo "No tmux rooms are running."
+  exit 0
+fi
+
+if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
+  print_rooms
+  exit 0
+fi
+
+if [[ $# -gt 0 ]]; then
+  target="$1"
+else
+  echo "tmux rooms — agent and uptime (q to quit)"
+  echo
+  print_rooms
+  echo
+  read -r -p 'Room number or name: ' choice
+  [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    ((choice >= 1 && choice <= ${#rows[@]})) || { echo "Invalid room number."; exit 2; }
+    IFS='|' read -r target _ <<<"${rows[$((choice-1))]}"
+  else
+    target="$choice"
+  fi
+fi
+
+if ! tmux has-session -t "$target" 2>/dev/null; then
+  echo "Room not found: $target"
+  exit 1
+fi
+
+echo "Attaching to $target. Detach with Ctrl-b then d."
+exec tmux attach-session -t "$target"
