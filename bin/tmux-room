@@ -103,7 +103,7 @@ print_rooms() {
     [[ "$attached" != "0" ]] && marker="* "
     cli=$(classify_cli "$name")
     age=$(format_age "$created")
-    printf '%2d) %s%-32s %-7s live %s\n' "$((i+1))" "$marker" "$name" "$cli" "$age"
+    printf '%2d) %s%-32s %-7s %2sw live %s\n' "$((i+1))" "$marker" "$name" "$cli" "$windows" "$age"
   done
 }
 
