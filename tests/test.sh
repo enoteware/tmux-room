@@ -113,12 +113,29 @@ assert_contains "$picker_output" "ROOM DETAILS"
 assert_contains "$picker_output" "AGENTS: Claude · claude-sonnet-4-6 · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · started 2026-07-20 01:34 · running 8m"
 assert_contains "$picker_output" "REPO: knowledge-hub"
 assert_contains "$picker_output" "SUMMED RSS SNAPSHOT: 768 MB · PROCESSES SNAPSHOT: 3"
-assert_contains "$picker_output" "Attach this room?"
+assert_contains "$picker_output" "Attach this room? [y/N]"
 assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
 
 : > "$TMUX_LOG"
 printf '1\n\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" >/dev/null
-assert_contains "$(<"$TMUX_LOG")" "attach-session -t alpha"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+printf '1\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" >/dev/null
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" alpha >/dev/null
+assert_contains "$(<"$TMUX_LOG")" "attach-session -t =alpha"
+
+: > "$TMUX_LOG"
+printf '1\ny\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" >/dev/null
+assert_contains "$(<"$TMUX_LOG")" "attach-session -t \$1"
+
+: > "$TMUX_LOG"
+attach_race_output=$(printf '1\ny\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_REVALIDATE_ID="\$2" TMUX_ROOM_DEVICE=devbox "$SCRIPT" || true)
+assert_contains "$attach_race_output" "Attachment aborted: room identity changed"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
 
 HOSTS="$MOCK/hosts"
 SSH_LOG="$MOCK/ssh.log"

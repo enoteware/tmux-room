@@ -28,7 +28,7 @@ ROOM DETAILS
     CONTEXT: unavailable (agent CLI does not expose it safely)
     PATH: /code/hub
 
-Attach this room? [Y/n]:
+Attach this room? [y/N]:
 ```
 
 - Compact room, state, window, and activity overview before selection
