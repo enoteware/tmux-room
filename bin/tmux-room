@@ -1,42 +1,86 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.1.0"
+TMUX_ROOM_VERSION="0.2.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
+TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
+TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
 
 usage() {
   cat <<'EOF'
-tmux-room — pick and attach to tmux rooms
+tmux-room — device-aware tmux agent room picker
 
 Usage:
-  tmux-room                  Interactive room picker
-  tmux-room <name>           Attach directly to a room
-  tmux-room --list           List rooms without attaching
-  tmux-room --version        Print the installed version
-  tmux-room --update         Update from the public GitHub repository
-  tmux-room --help           Show this help
+  tmux-room                       Interactive local room picker
+  tmux-room <name>                Attach to a local room
+  tmux-room device:room           Attach to a room on a configured device
+  tmux-room --list                Show detailed local room status
+  tmux-room --all                 Show rooms on local and configured SSH devices
+  tmux-room --kill <room>         Inspect and double-confirm killing a local room
+  tmux-room --kill device:room    Double-confirm killing a configured remote room
+  tmux-room --version             Print the installed version
+  tmux-room --update              Update from the public GitHub repository
+  tmux-room --help                Show this help
 
+Host registry:
+  ~/.config/tmux-room/hosts
+
+Format (one device per line):
+  mini elliot@mini.example.internal
+  devbox hostinger-vps
+
+Set a friendly local name in ~/.config/tmux-room/device or TMUX_ROOM_DEVICE.
 Detach from tmux with Ctrl-b then d.
 EOF
 }
 
-classify_cli() {
-  local session="$1" pane_pid
-  pane_pid=$(tmux list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
-  [[ -n "$pane_pid" ]] || { printf 'unknown'; return; }
+sanitize_text() {
+  printf '%s' "$1" | python3 -c 'import sys, unicodedata; s=sys.stdin.read(); sys.stdout.write("".join(ch for ch in s if ch.isprintable() and not unicodedata.category(ch).startswith("C")))'
+}
 
-  ROOT_PID="$pane_pid" python3 - <<'PY'
+get_device_name() {
+  if [[ -n "${TMUX_ROOM_DEVICE:-}" ]]; then
+    printf '%s' "$TMUX_ROOM_DEVICE"
+  elif [[ -s "$TMUX_ROOM_CONFIG_DIR/device" ]]; then
+    sed -n '1p' "$TMUX_ROOM_CONFIG_DIR/device"
+  elif command -v scutil >/dev/null 2>&1; then
+    scutil --get ComputerName 2>/dev/null || hostname -s
+  else
+    hostname -s 2>/dev/null || hostname
+  fi
+}
+
+format_date() {
+  TMUX_ROOM_FORMAT_DATE=1 TMUX_ROOM_EPOCH="$1" python3 - <<'PY'
+from datetime import datetime
 import os
+try:
+    print(datetime.fromtimestamp(int(os.environ['TMUX_ROOM_EPOCH'])).strftime('%Y-%m-%d %H:%M'))
+except (ValueError, OSError, OverflowError):
+    print('unknown')
+PY
+}
+
+agent_scan() {
+  local roots="$1" hints="$2"
+  TMUX_ROOM_AGENT_SCAN=1 TMUX_ROOM_ROOT_PIDS="$roots" TMUX_ROOM_PANE_HINTS="$hints" python3 - <<'PY'
+import os
+import re
 import subprocess
 
+roots = []
+for raw in os.environ.get('TMUX_ROOM_ROOT_PIDS', '').split(','):
+    try:
+        roots.append(int(raw))
+    except ValueError:
+        pass
+hints = os.environ.get('TMUX_ROOM_PANE_HINTS', '')
+
 rows = []
-raw = subprocess.run(
-    ['ps', '-eo', 'pid=,ppid=,args='],
-    capture_output=True,
-    text=True,
-    check=False,
+raw_ps = subprocess.run(
+    ['ps', '-eo', 'pid=,ppid=,args='], capture_output=True, text=True, check=False
 ).stdout
-for line in raw.splitlines():
+for line in raw_ps.splitlines():
     parts = line.strip().split(None, 2)
     if len(parts) == 3:
         try:
@@ -44,67 +88,334 @@ for line in raw.splitlines():
         except ValueError:
             pass
 
-root = int(os.environ['ROOT_PID'])
 children = {}
-for pid, ppid, arg in rows:
-    children.setdefault(ppid, []).append((pid, arg))
+args_by_pid = {}
+for pid, ppid, args in rows:
+    children.setdefault(ppid, []).append(pid)
+    args_by_pid[pid] = args
 
-queue = [root]
-seen = set()
+def identify(args):
+    low = args.lower()
+    if 'tmux-room' in low:
+        return None
+    if re.search(r'(^|[/\s])claude(?:\s|$)', low) or '/@anthropic-ai/claude-code' in low:
+        return 'Claude'
+    if re.search(r'(^|[/\s])codex(?:\s|$)', low) or 'codex-aarch64' in low:
+        return 'Codex'
+    if re.search(r'(^|[/\s])grok(?:\s|$)', low) or re.search(r'(^|[/\s])xai(?:\s|$)', low):
+        return 'Grok'
+    if re.search(r'(^|[/\s])gemini(?:\s|$)', low):
+        return 'Gemini'
+    return None
+
+def model_from(args, agent):
+    patterns = [
+        r'(?:--model|-m)[=\s]+([A-Za-z0-9._:/-]+)',
+        r'\b((?:gpt|claude|grok|gemini)-[A-Za-z0-9._-]+)\b',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, args, re.I)
+        if match:
+            return match.group(1)
+    return 'model unknown'
+
+def elapsed(pid):
+    value = subprocess.run(
+        ['ps', '-p', str(pid), '-o', 'etime='], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    return value.replace(' ', '') or 'unknown'
+
+def started_at(pid):
+    value = subprocess.run(
+        ['ps', '-p', str(pid), '-o', 'lstart='], capture_output=True, text=True, check=False,
+        env=dict(os.environ, LC_ALL='C')
+    ).stdout.strip()
+    try:
+        from datetime import datetime
+        return datetime.strptime(' '.join(value.split()), '%a %b %d %H:%M:%S %Y').strftime('%Y-%m-%d %H:%M')
+    except (ValueError, TypeError):
+        return 'unknown'
+
 found = []
+seen_pids = set()
+queue = list(roots)
 while queue:
     pid = queue.pop(0)
-    if pid in seen:
+    if pid in seen_pids:
         continue
-    seen.add(pid)
-    for child, arg in children.get(pid, []):
-        low = arg.lower()
-        if 'claude' in low and 'tmux-room' not in low:
-            found.append('Claude')
-        elif 'codex' in low:
-            found.append('Codex')
-        elif any(name in low for name in ('grok', 'xai')):
-            found.append('Grok')
-        queue.append(child)
+    seen_pids.add(pid)
+    args = args_by_pid.get(pid, '')
+    agent = identify(args)
+    if agent:
+        found.append((agent, model_from(args, agent), elapsed(pid), started_at(pid)))
+    queue.extend(children.get(pid, []))
 
-print(found[0] if found else 'shell')
+# Pane command/title hints are a fallback when the process tree is momentarily sparse.
+for hint in hints.split('||'):
+    agent = identify(hint)
+    if agent and not any(item[0] == agent for item in found):
+        found.append((agent, model_from(hint, agent), 'unknown', 'unknown'))
+
+unique = []
+seen = set()
+for item in found:
+    key = (item[0], item[1])
+    if key not in seen:
+        seen.add(key)
+        unique.append(item)
+for item in unique:
+    print('\t'.join(item))
 PY
 }
 
-format_age() {
-  local created="$1" now age d h m
-  now=$(date +%s)
-  age=$((now-created))
-  ((age < 0)) && age=0
-  d=$((age/86400))
-  h=$((age%86400/3600))
-  m=$((age%3600/60))
-  if ((d > 0)); then
-    printf '%dd %02dh' "$d" "$h"
-  elif ((h > 0)); then
-    printf '%dh %02dm' "$h" "$m"
-  else
-    printf '%dm' "$m"
-  fi
+resource_scan() {
+  TMUX_ROOM_RESOURCE_SCAN=1 TMUX_ROOM_ROOT_PIDS="$1" python3 - <<'PY'
+import os
+import subprocess
+
+roots = []
+for raw in os.environ.get('TMUX_ROOM_ROOT_PIDS', '').split(','):
+    try:
+        roots.append(int(raw))
+    except ValueError:
+        pass
+
+rows = []
+ps_result = subprocess.run(
+    ['ps', '-eo', 'pid=,ppid=,rss='], capture_output=True, text=True, check=False
+)
+if ps_result.returncode != 0:
+    print('unavailable\tunavailable')
+    raise SystemExit(0)
+for line in ps_result.stdout.splitlines():
+    parts = line.strip().split()
+    if len(parts) == 3:
+        try:
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+        except ValueError:
+            pass
+
+children = {}
+rss_by_pid = {}
+for pid, ppid, rss in rows:
+    children.setdefault(ppid, []).append(pid)
+    rss_by_pid[pid] = rss
+
+seen = set()
+queue = list(roots)
+while queue:
+    pid = queue.pop(0)
+    if pid in seen or pid not in rss_by_pid:
+        continue
+    seen.add(pid)
+    queue.extend(children.get(pid, []))
+
+total_kb = sum(rss_by_pid.get(pid, 0) for pid in seen)
+total_mb = (total_kb + 1023) // 1024
+print(f'{total_mb}\t{len(seen)}')
+PY
 }
 
 load_rows() {
   rows=()
   while IFS= read -r row; do
     [[ -n "$row" ]] && rows+=("$row")
-  done < <(tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}' 2>/dev/null | sort -t'|' -k1,1)
+  done < <(tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}|#{session_id}' 2>/dev/null | sort -t'|' -k1,1)
 }
 
-print_rooms() {
-  local i name windows attached created marker cli age
+session_details() {
+  local name="$1" windows="$2" attached="$3" created="$4" activity="$5" session_id="$6" index="$7"
+  local status display_name pid path command title roots hints first_path repo_names branches top branch
+  local agent_lines agent name_model age started agent_summary opened active window_word
+  local resource_line memory_mb process_count memory_flag resource_available
+
+  [[ "$attached" == "0" ]] && status="detached" || status="attached"
+  [[ "$windows" == "1" ]] && window_word="window" || window_word="windows"
+
+  roots=""
+  hints=""
+  first_path=""
+  repo_names=""
+  branches=""
+  while IFS='|' read -r pid path command title; do
+    [[ -z "$pid" ]] && continue
+    roots="${roots:+$roots,}$pid"
+    hints="${hints:+$hints||}$command $title"
+    [[ -z "$first_path" ]] && first_path="$path"
+    if top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null); then
+      name_model=$(basename "$top")
+      case ",$repo_names," in *",$name_model,"*) ;; *) repo_names="${repo_names:+$repo_names, }$name_model" ;; esac
+      branch=$(git -C "$path" branch --show-current 2>/dev/null || true)
+      [[ -z "$branch" ]] && branch="detached@$(git -C "$path" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+      case ",$branches," in *",$branch,"*) ;; *) branches="${branches:+$branches, }$branch" ;; esac
+    fi
+  done < <(tmux list-panes -s -t "$session_id" -F '#{pane_pid}|#{pane_current_path}|#{pane_current_command}|#{pane_title}' 2>/dev/null)
+
+  agent_lines=$(agent_scan "$roots" "$hints")
+  agent_summary=""
+  while IFS=$'\t' read -r agent name_model age started; do
+    [[ -z "$agent" ]] && continue
+    agent_summary="${agent_summary:+$agent_summary; }$agent · $name_model · started $started · running $age"
+  done <<<"$agent_lines"
+  [[ -z "$agent_summary" ]] && agent_summary="none detected"
+
+  resource_line=$(resource_scan "$roots")
+  IFS=$'\t' read -r memory_mb process_count <<<"$resource_line"
+  resource_available=0
+  memory_flag=""
+  if [[ "$memory_mb" =~ ^[0-9]+$ && "$process_count" =~ ^[0-9]+$ ]]; then
+    resource_available=1
+    if ((memory_mb >= 4096)); then
+      memory_flag=" [HIGH]"
+    elif ((memory_mb >= 1024)); then
+      memory_flag=" [ELEVATED]"
+    fi
+  fi
+
+  opened=$(format_date "$created")
+  active=$(format_date "$activity")
+  [[ -z "$repo_names" ]] && repo_names="not a Git repo"
+  [[ -z "$branches" ]] && branches="n/a"
+  [[ -z "$first_path" ]] && first_path="unknown"
+
+  display_name=$(sanitize_text "$name")
+  repo_names=$(sanitize_text "$repo_names")
+  branches=$(sanitize_text "$branches")
+  first_path=$(sanitize_text "$first_path")
+  agent_summary=$(sanitize_text "$agent_summary")
+
+  printf '  ROOM: %s [%s] · %s %s · #%s\n' "$display_name" "$status" "$windows" "$window_word" "$index"
+  printf '    AGENTS: %s\n' "$agent_summary"
+  printf '    OPENED: %s · LAST ACTIVE: %s\n' "$opened" "$active"
+  printf '    REPO: %s · BRANCH: %s\n' "$repo_names" "$branches"
+  if ((resource_available == 1)); then
+    printf '    SUMMED RSS SNAPSHOT: %s MB%s · PROCESSES SNAPSHOT: %s\n' "$memory_mb" "$memory_flag" "$process_count"
+  else
+    printf '    RESOURCE SNAPSHOT: unavailable\n'
+  fi
+  printf '    CONTEXT: unavailable (agent CLI does not expose it safely)\n'
+  printf '    PATH: %s\n' "$first_path"
+}
+
+print_local_rooms() {
+  local source_label="${1:-local}" device i name windows attached created activity session_id
+  device=$(sanitize_text "$(get_device_name)")
+  printf 'DEVICE: %s [%s]\n' "$device" "$source_label"
+  if ! tmux has-session 2>/dev/null; then
+    echo '  No tmux rooms are running.'
+    return 0
+  fi
+  load_rows
+  if ((${#rows[@]} == 0)); then
+    echo '  No tmux rooms are running.'
+    return 0
+  fi
   for i in "${!rows[@]}"; do
-    IFS='|' read -r name windows attached created <<<"${rows[$i]}"
-    marker="  "
-    [[ "$attached" != "0" ]] && marker="* "
-    cli=$(classify_cli "$name")
-    age=$(format_age "$created")
-    printf '%2d) %s%-32s %-7s %2sw live %s\n' "$((i+1))" "$marker" "$name" "$cli" "$windows" "$age"
+    IFS='|' read -r name windows attached created activity session_id <<<"${rows[$i]}"
+    session_details "$name" "$windows" "$attached" "$created" "$activity" "$session_id" "$((i+1))"
+    [[ "$i" != "$((${#rows[@]}-1))" ]] && echo
   done
+  return 0
+}
+
+kill_local_room() {
+  local room="$1" row name windows attached created activity session_id confirm final found
+  local current_identity roots pid final_resource final_memory final_processes
+  [[ "$room" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Invalid room name." >&2; return 2; }
+  if ! tmux has-session -t "=$room" 2>/dev/null; then
+    echo "Room not found: $room" >&2
+    return 1
+  fi
+
+  load_rows
+  found=0
+  for row in "${rows[@]}"; do
+    IFS='|' read -r name windows attached created activity session_id <<<"$row"
+    [[ "$name" == "$room" ]] || continue
+    echo "Room selected for termination:"
+    session_details "$name" "$windows" "$attached" "$created" "$activity" "$session_id" 1
+    found=1
+    break
+  done
+  ((found == 1)) || { echo "Unable to inspect room: $room" >&2; return 1; }
+
+  echo
+  echo "WARNING: Killing this room asks tmux to terminate the session and its panes."
+  echo "Detached, daemonized, reparented, or signal-ignoring processes may survive."
+  if ! read -r -p "Confirmation 1/2 — type the exact room name ($room): " confirm || [[ "$confirm" != "$room" ]]; then
+    echo "Kill cancelled."
+    return 0
+  fi
+  if ! read -r -p "Confirmation 2/2 — type KILL: " final || [[ "$final" != "KILL" ]]; then
+    echo "Kill cancelled."
+    return 0
+  fi
+
+  current_identity=$(tmux display-message -p -t "=$room" '#{session_id}|#{session_name}' 2>/dev/null || true)
+  if [[ "$current_identity" != "$session_id|$room" ]]; then
+    echo "Kill aborted: room identity changed after inspection."
+    return 1
+  fi
+
+  roots=""
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && roots="${roots:+$roots,}$pid"
+  done < <(tmux list-panes -s -t "$session_id" -F '#{pane_pid}' 2>/dev/null)
+  final_resource=$(resource_scan "$roots")
+  IFS=$'\t' read -r final_memory final_processes <<<"$final_resource"
+  if [[ "$final_memory" =~ ^[0-9]+$ && "$final_processes" =~ ^[0-9]+$ ]]; then
+    echo "Final best-effort snapshot: summed RSS $final_memory MB · processes $final_processes"
+  else
+    echo "Final resource snapshot: unavailable"
+  fi
+
+  current_identity=$(tmux display-message -p -t "=$room" '#{session_id}|#{session_name}' 2>/dev/null || true)
+  if [[ "$current_identity" != "$session_id|$room" ]]; then
+    echo "Kill aborted: room identity changed during final snapshot."
+    return 1
+  fi
+
+  tmux kill-session -t "$session_id"
+  echo "Killed room: $room"
+}
+
+valid_host_field() {
+  [[ -n "$1" && "$1" != -* && "$1" =~ ^[A-Za-z0-9._@:-]+$ ]]
+}
+
+lookup_host() {
+  local wanted="$1" label target rest
+  [[ -f "$TMUX_ROOM_HOSTS_FILE" ]] || return 1
+  while read -r label target rest || [[ -n "$label" ]]; do
+    [[ -z "$label" || "$label" == \#* ]] && continue
+    [[ -z "$rest" ]] || return 1
+    [[ "$label" == "$wanted" ]] || continue
+    valid_host_field "$label" && valid_host_field "$target" || return 1
+    printf '%s' "$target"
+    return 0
+  done < "$TMUX_ROOM_HOSTS_FILE"
+  return 1
+}
+
+print_all_devices() {
+  local label target rest safe_label
+  print_local_rooms local
+  [[ -f "$TMUX_ROOM_HOSTS_FILE" ]] || return 0
+  command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote inventory." >&2; return 127; }
+  while read -r label target rest || [[ -n "$label" ]]; do
+    [[ -z "$label" || "$label" == \#* ]] && continue
+    safe_label=$(sanitize_text "$label")
+    if [[ -n "$rest" ]] || ! valid_host_field "$label" || ! valid_host_field "$target"; then
+      echo
+      echo "DEVICE: $safe_label [invalid host entry]"
+      continue
+    fi
+    [[ "$label" == "$(get_device_name)" ]] && continue
+    echo
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 -- "$target" "TMUX_ROOM_DEVICE=$label tmux-room --list"; then
+      echo "DEVICE: $label [unreachable]"
+    fi
+  done < "$TMUX_ROOM_HOSTS_FILE"
 }
 
 self_update() {
@@ -112,10 +423,8 @@ self_update() {
   self="${BASH_SOURCE[0]}"
   if [[ ! -w "$self" ]]; then
     echo "Cannot update $self: file is not writable." >&2
-    echo "Re-run the installer or update it with the account that owns the file." >&2
     exit 1
   fi
-
   tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-room.XXXXXX")
   trap 'rm -f "$tmp"' EXIT
   if command -v curl >/dev/null 2>&1; then
@@ -126,7 +435,6 @@ self_update() {
     echo "tmux-room update requires curl or wget." >&2
     exit 1
   fi
-
   "${downloader[@]}"
   bash -n "$tmp"
   grep -q '^TMUX_ROOM_VERSION=' "$tmp"
@@ -136,54 +444,82 @@ self_update() {
   echo "Updated tmux-room: $($self --version)"
 }
 
+require_local_dependencies() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux-room requires tmux for local room inventory." >&2
+    exit 127
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "tmux-room requires Python 3.7+ for agent detection." >&2
+    exit 127
+  fi
+  if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null; then
+    echo "tmux-room requires Python 3.7+ for agent detection." >&2
+    exit 127
+  fi
+}
+
 case "${1:-}" in
-  --version|-V)
-    echo "tmux-room $TMUX_ROOM_VERSION"
-    exit 0
-    ;;
-  --help|-h)
-    usage
-    exit 0
-    ;;
-  --update)
-    self_update
-    exit 0
+  --version|-V) echo "tmux-room $TMUX_ROOM_VERSION"; exit 0 ;;
+  --help|-h) usage; exit 0 ;;
+  --update) self_update; exit 0 ;;
+esac
+
+# Remote kill runs the same double-confirmation flow on the destination host.
+if [[ "${1:-}" == "--kill" && "${2:-}" == *:* ]]; then
+  device=${2%%:*}
+  target=${2#*:}
+  if ! valid_host_field "$device" || [[ ! "$target" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Invalid device or room name." >&2
+    exit 2
+  fi
+  remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
+  command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote termination." >&2; exit 127; }
+  exec ssh -t -- "$remote" tmux-room --kill "$target"
+fi
+
+# Remote attachment needs SSH only; it does not require local tmux or Python.
+if [[ "${1:-}" == *:* ]]; then
+  device=${1%%:*}
+  target=${1#*:}
+  if ! valid_host_field "$device" || [[ ! "$target" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Invalid device or room name." >&2
+    exit 2
+  fi
+  remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
+  command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote attachment." >&2; exit 127; }
+  echo "Attaching to $target on $device. Detach with Ctrl-b then d."
+  exec ssh -t -- "$remote" tmux-room "$target"
+fi
+
+require_local_dependencies
+
+case "${1:-}" in
+  --all) print_all_devices; exit 0 ;;
+  --list|-l) print_local_rooms local; exit 0 ;;
+  --kill)
+    [[ $# -eq 2 ]] || { echo "Usage: tmux-room --kill <room|device:room>" >&2; exit 2; }
+    kill_local_room "$2"
+    exit $?
     ;;
 esac
 
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "tmux-room requires tmux." >&2
-  exit 127
-fi
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "tmux-room requires python3 for agent detection." >&2
-  exit 127
-fi
-
 if ! tmux has-session 2>/dev/null; then
-  echo "No tmux rooms are running."
+  print_local_rooms local
   exit 0
 fi
-
 load_rows
 if ((${#rows[@]} == 0)); then
-  echo "No tmux rooms are running."
-  exit 0
-fi
-
-if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
-  print_rooms
+  print_local_rooms local
   exit 0
 fi
 
 if [[ $# -gt 0 ]]; then
   target="$1"
 else
-  echo "tmux rooms — agent and uptime (q to quit)"
+  print_local_rooms local
   echo
-  print_rooms
-  echo
-  read -r -p 'Room number or name: ' choice
+  read -r -p 'Room number or name (q to quit): ' choice
   [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
   if [[ "$choice" =~ ^[0-9]+$ ]]; then
     ((choice >= 1 && choice <= ${#rows[@]})) || { echo "Invalid room number."; exit 2; }
