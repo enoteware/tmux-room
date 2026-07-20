@@ -10,10 +10,13 @@ The default picker and `--list` stay compact, with one room per row:
 
 ```text
 DEVICE: mini [local]
-  #  ROOM                             STATE     WINDOWS  LAST ACTIVE
-  -- -------------------------------- --------- -------  ----------------
-  1  kh-review                        attached        2  2026-07-20 01:42
-  2  release-check                    detached        1  2026-07-20 00:18
+STATUS: CPU 12% load (0.96/8) · RAM 44% (13.9/31.3 GB)
+Use ↑/↓ to move · Enter inspect/attach · x close · q quit
+
+  #  ROOM                         PROVIDER/MODEL           STATE     WINDOWS  LAST ACTIVE
+  -- ---------------------------- ------------------------ --------- -------  ----------------
+  1  kh-review                    claude-fable5-low        attached        2  2026-07-20 01:42
+  2  release-check                codex-gpt5.6-medium      detached        1  2026-07-20 00:18
 ```
 
 Select a room in the interactive picker to reveal its full detail card before attaching:
@@ -21,7 +24,7 @@ Select a room in the interactive picker to reveal its full detail card before at
 ```text
 ROOM DETAILS
   ROOM: kh-review [attached] · 2 windows · #1
-    AGENTS: Claude · claude-sonnet-4-6 · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · started 2026-07-20 01:34 · running 8m
+    AGENTS: Claude · fable5 · effort low · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · effort medium · started 2026-07-20 01:34 · running 8m
     OPENED: 2026-07-20 00:55 · LAST ACTIVE: 2026-07-20 01:42
     REPO: knowledge-hub · BRANCH: feature/mobile-ui
     SUMMED RSS SNAPSHOT: 768 MB · PROCESSES SNAPSHOT: 3
@@ -31,6 +34,10 @@ ROOM DETAILS
 Attach this room? [y/N]:
 ```
 
+- Arrow-key navigation in interactive terminals (`↑`/`↓`, `Enter`, `x`, `q`)
+- Compact CPU-load and RAM status for each device
+- Provider/model/effort labels such as `claude-fable5-low` when safely discoverable
+- A once-daily cached release check that stays silent when current
 - Compact room, state, window, and activity overview before selection
 - Every active supported agent after selection
 - Model when safely discoverable from process arguments or pane metadata

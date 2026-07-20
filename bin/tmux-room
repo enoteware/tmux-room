@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.2.1"
+TMUX_ROOM_VERSION="0.3.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
@@ -11,7 +11,7 @@ usage() {
 tmux-room — device-aware tmux agent room picker
 
 Usage:
-  tmux-room                       Interactive local room picker
+  tmux-room                       Arrow-key picker (Enter inspect, x close, q quit)
   tmux-room <name>                Attach to a local room
   tmux-room device:room           Attach to a room on a configured device
   tmux-room --list                Show compact local room table
@@ -61,9 +61,94 @@ except (ValueError, OSError, OverflowError):
 PY
 }
 
+server_status() {
+  TMUX_ROOM_SERVER_STATUS=1 python3 - <<'PY'
+import os
+import platform
+import re
+import shutil
+import subprocess
+
+try:
+    load = os.getloadavg()[0]
+    cores = os.cpu_count() or 1
+    cpu_pct = round(load / cores * 100)
+except (AttributeError, OSError):
+    load, cores, cpu_pct = 0.0, 1, 0
+
+try:
+    if platform.system() == 'Darwin':
+        sysctl = shutil.which('sysctl') or '/usr/sbin/sysctl'
+        vm_stat = shutil.which('vm_stat') or '/usr/bin/vm_stat'
+        total = int(subprocess.run([sysctl, '-n', 'hw.memsize'], capture_output=True, text=True, check=True).stdout.strip())
+        vm_text = subprocess.run([vm_stat], capture_output=True, text=True, check=True).stdout
+        size_match = re.search(r'page size of (\d+) bytes', vm_text)
+        page_size = int(size_match.group(1)) if size_match else 4096
+        values = {name: int(value) for name, value in re.findall(r'^([^:]+):\s+(\d+)\.', vm_text, re.M)}
+        available_pages = sum(values.get(name, 0) for name in ('Pages free', 'Pages inactive', 'Pages speculative'))
+        available = available_pages * page_size
+    else:
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        total = os.sysconf('SC_PHYS_PAGES') * page_size
+        available = os.sysconf('SC_AVPHYS_PAGES') * page_size
+    used = max(0, total - available)
+    ram_pct = round(used / total * 100) if total else 0
+    used_gb = used / (1024 ** 3)
+    total_gb = total / (1024 ** 3)
+    ram = f'RAM {ram_pct}% ({used_gb:.1f}/{total_gb:.1f} GB)'
+except (ValueError, OSError):
+    ram = 'RAM unavailable'
+
+print(f'CPU {cpu_pct}% load ({load:.2f}/{cores}) · {ram}')
+PY
+}
+
+version_is_newer() {
+  TMUX_ROOM_CURRENT_VERSION="$TMUX_ROOM_VERSION" TMUX_ROOM_LATEST_VERSION="$1" python3 - <<'PY'
+import os
+
+def parts(value):
+    value = value.lstrip('v')
+    return tuple(int(piece) for piece in value.split('.'))
+
+try:
+    raise SystemExit(0 if parts(os.environ['TMUX_ROOM_LATEST_VERSION']) > parts(os.environ['TMUX_ROOM_CURRENT_VERSION']) else 1)
+except (KeyError, ValueError):
+    raise SystemExit(1)
+PY
+}
+
+check_for_update() {
+  local cache_file="$TMUX_ROOM_CONFIG_DIR/update-check" now checked_at latest response tmp
+  [[ "${TMUX_ROOM_DISABLE_UPDATE_CHECK:-0}" == "1" ]] && return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  now=$(date +%s)
+  checked_at=""
+  latest=""
+  if [[ -r "$cache_file" ]]; then
+    IFS='|' read -r checked_at latest < "$cache_file" || true
+  fi
+  if [[ ! "$checked_at" =~ ^[0-9]+$ ]] || ((now - checked_at >= 86400)); then
+    response=$(curl --connect-timeout 1 --max-time 2 -fsSL 'https://api.github.com/repos/enoteware/tmux-room/releases/latest' 2>/dev/null || true)
+    latest=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name", ""))' 2>/dev/null || true)
+    if [[ "$latest" =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]]; then
+      mkdir -p "$TMUX_ROOM_CONFIG_DIR" 2>/dev/null || true
+      tmp="$cache_file.$$"
+      if printf '%s|%s\n' "$now" "$latest" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$cache_file" 2>/dev/null || rm -f "$tmp"
+      fi
+    else
+      latest=""
+    fi
+  fi
+  if [[ -n "$latest" ]] && version_is_newer "$latest"; then
+    printf 'UPDATE: %s available · run tmux-room --update\n\n' "$latest"
+  fi
+}
+
 agent_scan() {
-  local roots="$1" hints="$2"
-  TMUX_ROOM_AGENT_SCAN=1 TMUX_ROOM_ROOT_PIDS="$roots" TMUX_ROOM_PANE_HINTS="$hints" python3 - <<'PY'
+  local roots="$1" hints="$2" compact="${3:-0}"
+  TMUX_ROOM_AGENT_SCAN=1 TMUX_ROOM_COMPACT_AGENT_SCAN="$compact" TMUX_ROOM_ROOT_PIDS="$roots" TMUX_ROOM_PANE_HINTS="$hints" python3 - <<'PY'
 import os
 import re
 import subprocess
@@ -75,6 +160,7 @@ for raw in os.environ.get('TMUX_ROOM_ROOT_PIDS', '').split(','):
     except ValueError:
         pass
 hints = os.environ.get('TMUX_ROOM_PANE_HINTS', '')
+compact = os.environ.get('TMUX_ROOM_COMPACT_AGENT_SCAN') == '1'
 
 rows = []
 raw_ps = subprocess.run(
@@ -119,6 +205,17 @@ def model_from(args, agent):
             return match.group(1)
     return 'model unknown'
 
+def effort_from(args):
+    patterns = [
+        r'(?:--effort)[=\s]+([A-Za-z0-9._-]+)',
+        r'(?:model_reasoning_effort|reasoning_effort)[=\s]+["\x27]?([A-Za-z0-9._-]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, args, re.I)
+        if match:
+            return match.group(1).lower()
+    return 'unknown'
+
 def elapsed(pid):
     value = subprocess.run(
         ['ps', '-p', str(pid), '-o', 'etime='], capture_output=True, text=True, check=False
@@ -147,14 +244,15 @@ while queue:
     args = args_by_pid.get(pid, '')
     agent = identify(args)
     if agent:
-        found.append((agent, model_from(args, agent), elapsed(pid), started_at(pid)))
+        timing = ('unknown', 'unknown') if compact else (elapsed(pid), started_at(pid))
+        found.append((agent, model_from(args, agent), timing[0], timing[1], effort_from(args)))
     queue.extend(children.get(pid, []))
 
 # Pane command/title hints are a fallback when the process tree is momentarily sparse.
 for hint in hints.split('||'):
     agent = identify(hint)
     if agent and not any(item[0] == agent for item in found):
-        found.append((agent, model_from(hint, agent), 'unknown', 'unknown'))
+        found.append((agent, model_from(hint, agent), 'unknown', 'unknown', effort_from(hint)))
 
 unique = []
 seen = set()
@@ -226,7 +324,7 @@ load_rows() {
 session_details() {
   local name="$1" windows="$2" attached="$3" created="$4" activity="$5" session_id="$6" index="$7"
   local status display_name pid path command title roots hints first_path repo_names branches top branch
-  local agent_lines agent name_model age started agent_summary opened active window_word
+  local agent_lines agent name_model age started effort agent_summary opened active window_word
   local resource_line memory_mb process_count memory_flag resource_available
 
   [[ "$attached" == "0" ]] && status="detached" || status="attached"
@@ -253,9 +351,10 @@ session_details() {
 
   agent_lines=$(agent_scan "$roots" "$hints")
   agent_summary=""
-  while IFS=$'\t' read -r agent name_model age started; do
+  while IFS=$'\t' read -r agent name_model age started effort; do
     [[ -z "$agent" ]] && continue
-    agent_summary="${agent_summary:+$agent_summary; }$agent · $name_model · started $started · running $age"
+    [[ -z "$effort" || "$effort" == "unknown" ]] && effort="unknown"
+    agent_summary="${agent_summary:+$agent_summary; }$agent · $name_model · effort $effort · started $started · running $age"
   done <<<"$agent_lines"
   [[ -z "$agent_summary" ]] && agent_summary="none detected"
 
@@ -297,11 +396,121 @@ session_details() {
   printf '    PATH: %s\n' "$first_path"
 }
 
+load_compact_agent_inventory() {
+  local pane_rows session_id label
+  compact_agent_ids=()
+  compact_agent_labels=()
+  pane_rows=$(tmux list-panes -a -F '#{session_id}|#{pane_pid}|#{pane_current_command}|#{pane_title}' 2>/dev/null || true)
+  while IFS=$'\t' read -r session_id label; do
+    [[ -z "$session_id" ]] && continue
+    compact_agent_ids+=("$session_id")
+    compact_agent_labels+=("$label")
+  done < <(TMUX_ROOM_AGENT_INVENTORY=1 TMUX_ROOM_PANE_ROWS="$pane_rows" python3 - <<'PY'
+import os
+import re
+import subprocess
+
+panes = {}
+for line in os.environ.get('TMUX_ROOM_PANE_ROWS', '').splitlines():
+    parts = line.split('|', 3)
+    if len(parts) != 4:
+        continue
+    sid, raw_pid, command, title = parts
+    try:
+        pid = int(raw_pid)
+    except ValueError:
+        continue
+    panes.setdefault(sid, []).append((pid, f'{command} {title}'))
+
+ps_rows = []
+result = subprocess.run(['ps', '-eo', 'pid=,ppid=,args='], capture_output=True, text=True, check=False)
+for line in result.stdout.splitlines():
+    parts = line.strip().split(None, 2)
+    if len(parts) == 3:
+        try:
+            ps_rows.append((int(parts[0]), int(parts[1]), parts[2]))
+        except ValueError:
+            pass
+children = {}
+args_by_pid = {}
+for pid, ppid, args in ps_rows:
+    children.setdefault(ppid, []).append(pid)
+    args_by_pid[pid] = args
+
+def identify(args):
+    low = args.lower()
+    if 'tmux-room' in low:
+        return None
+    checks = [
+        ('claude', r'(^|[/\s])claude(?:\s|$)|/@anthropic-ai/claude-code'),
+        ('codex', r'(^|[/\s])codex(?:\s|$)|codex-aarch64'),
+        ('grok', r'(^|[/\s])(?:grok|xai)(?:\s|$)'),
+        ('gemini', r'(^|[/\s])gemini(?:\s|$)'),
+    ]
+    for provider, pattern in checks:
+        if re.search(pattern, low):
+            return provider
+    return None
+
+def field(args, patterns, default):
+    for pattern in patterns:
+        match = re.search(pattern, args, re.I)
+        if match:
+            return match.group(1).lower()
+    return default
+
+def label(args, provider):
+    model = field(args, [r'(?:--model|-m)[=\s]+([A-Za-z0-9._:/-]+)', r'\b((?:gpt|claude|grok|gemini|fable)-?[A-Za-z0-9._-]+)\b'], 'unknown')
+    effort = field(args, [r'--effort[=\s]+([A-Za-z0-9._-]+)', r'(?:model_reasoning_effort|reasoning_effort)[=\s]+["\x27]?([A-Za-z0-9._-]+)'], 'unknown')
+    if model.startswith('claude-'):
+        model = model[len('claude-'):]
+    model = model.replace('-', '')
+    return '-'.join(part for part in (provider, model, effort) if part != 'unknown') or 'none'
+
+for sid, pane_items in panes.items():
+    found = None
+    queue = [pid for pid, _ in pane_items]
+    seen = set()
+    while queue and not found:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        args = args_by_pid.get(pid, '')
+        provider = identify(args)
+        if provider:
+            found = label(args, provider)
+            break
+        queue.extend(children.get(pid, []))
+    if not found:
+        for _, hint in pane_items:
+            provider = identify(hint)
+            if provider:
+                found = label(hint, provider)
+                break
+    print(f'{sid}\t{found or "none"}')
+PY
+  )
+}
+
+compact_agent_label() {
+  local wanted="$1" i
+  for i in "${!compact_agent_ids[@]}"; do
+    if [[ "${compact_agent_ids[i]}" == "$wanted" ]]; then
+      printf '%s' "${compact_agent_labels[i]}"
+      return 0
+    fi
+  done
+  printf 'none'
+}
+
 print_local_rooms() {
-  local source_label="${1:-local}" device i name windows attached created activity session_id status display_name last_active
+  local source_label="${1:-local}" device i name windows attached created activity session_id status display_name last_active agent_label status_line
   device=$(sanitize_text "$(get_device_name)")
   source_label=$(sanitize_text "$source_label")
+  status_line=$(sanitize_text "$(server_status)")
   printf 'DEVICE: %s [%s]\n' "$device" "$source_label"
+  printf 'STATUS: %s\n' "$status_line"
   if ! tmux has-session 2>/dev/null; then
     echo '  No tmux rooms are running.'
     return 0
@@ -311,14 +520,16 @@ print_local_rooms() {
     echo '  No tmux rooms are running.'
     return 0
   fi
-  printf '  #  %-32s %-9s %7s  %s\n' 'ROOM' 'STATE' 'WINDOWS' 'LAST ACTIVE'
-  printf '  -- %-32s --------- -------  ----------------\n' '--------------------------------'
+  load_compact_agent_inventory
+  printf '  #  %-28s %-24s %-9s %7s  %s\n' 'ROOM' 'PROVIDER/MODEL' 'STATE' 'WINDOWS' 'LAST ACTIVE'
+  printf '  -- %-28s %-24s --------- -------  ----------------\n' '----------------------------' '------------------------'
   for i in "${!rows[@]}"; do
     IFS='|' read -r name windows attached created activity session_id <<<"${rows[$i]}"
     [[ "$attached" == "0" ]] && status="detached" || status="attached"
     display_name=$(sanitize_text "$name")
+    agent_label=$(compact_agent_label "$session_id")
     last_active=$(format_date "$activity")
-    printf '  %-2d %-32s %-9s %7s  %s\n' "$((i+1))" "$display_name" "$status" "$windows" "$last_active"
+    printf '  %-2d %-28s %-24s %-9s %7s  %s\n' "$((i+1))" "$display_name" "$agent_label" "$status" "$windows" "$last_active"
   done
   return 0
 }
@@ -466,6 +677,71 @@ self_update() {
   echo "Updated tmux-room: $($self --version)"
 }
 
+arrow_picker() {
+  local selected=0 key rest i name windows attached created activity session_id status status_line
+  local -a picker_names picker_windows picker_statuses picker_active picker_agents
+  while true; do
+    load_rows
+    ((${#rows[@]} > 0)) || { echo 'No tmux rooms are running.'; return 1; }
+    ((selected < ${#rows[@]})) || selected=$((${#rows[@]} - 1))
+    picker_names=()
+    picker_windows=()
+    picker_statuses=()
+    picker_active=()
+    picker_agents=()
+    load_compact_agent_inventory
+    for i in "${!rows[@]}"; do
+      IFS='|' read -r name windows attached created activity session_id <<<"${rows[$i]}"
+      [[ "$attached" == "0" ]] && status="detached" || status="attached"
+      picker_names[i]=$(sanitize_text "$name")
+      picker_windows[i]="$windows"
+      picker_statuses[i]="$status"
+      picker_active[i]=$(format_date "$activity")
+      picker_agents[i]=$(compact_agent_label "$session_id")
+    done
+
+    while true; do
+      printf '\033[2J\033[H'
+    printf 'DEVICE: %s [local]\n' "$(sanitize_text "$(get_device_name)")"
+    status_line=$(sanitize_text "$(server_status)")
+    printf 'STATUS: %s\n' "$status_line"
+    printf 'Use ↑/↓ to move · Enter inspect/attach · x close · q quit\n\n'
+    printf '  #  %-28s %-24s %-9s %7s  %s\n' 'ROOM' 'PROVIDER/MODEL' 'STATE' 'WINDOWS' 'LAST ACTIVE'
+    printf '  -- %-28s %-24s --------- -------  ----------------\n' '----------------------------' '------------------------'
+    for i in "${!rows[@]}"; do
+      if ((i == selected)); then printf '\033[7m'; fi
+      printf '  %-2d %-28s %-24s %-9s %7s  %s' "$((i+1))" "${picker_names[i]}" "${picker_agents[i]}" "${picker_statuses[i]}" "${picker_windows[i]}" "${picker_active[i]}"
+      if ((i == selected)); then printf '\033[0m'; fi
+      printf '\n'
+    done
+
+    IFS= read -rsn1 key || return 1
+    if [[ "$key" == $'\033' ]]; then
+      rest=""
+      IFS= read -rsn2 rest || true
+      case "$rest" in
+        '[A') if ((selected > 0)); then selected=$((selected - 1)); fi ;;
+        '[B') if ((selected + 1 < ${#rows[@]})); then selected=$((selected + 1)); fi ;;
+      esac
+      continue
+    fi
+    case "$key" in
+      q|Q) return 1 ;;
+      x|X)
+        target="${picker_names[selected]}"
+        printf '\033[0m\n'
+        kill_local_room "$target"
+        break
+        ;;
+      '')
+        target="${picker_names[selected]}"
+        return 0
+        ;;
+    esac
+    done
+  done
+}
+
 require_local_dependencies() {
   if ! command -v tmux >/dev/null 2>&1; then
     echo "tmux-room requires tmux for local room inventory." >&2
@@ -540,16 +816,21 @@ selected_session_id=""
 if [[ $# -gt 0 ]]; then
   target="$1"
 else
-  print_local_rooms local
-  echo
-  printf 'Room number or name (q to quit): '
-  read -r choice || exit 0
-  [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
-  if [[ "$choice" =~ ^[0-9]+$ ]]; then
-    ((choice >= 1 && choice <= ${#rows[@]})) || { echo "Invalid room number."; exit 2; }
-    IFS='|' read -r target _ <<<"${rows[$((choice-1))]}"
+  check_for_update
+  if [[ -t 0 && -t 1 || "${TMUX_ROOM_FORCE_ARROW:-0}" == "1" ]]; then
+    arrow_picker || exit 0
   else
-    target="$choice"
+    print_local_rooms local
+    echo
+    printf 'Room number or name (q to quit): '
+    read -r choice || exit 0
+    [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      ((choice >= 1 && choice <= ${#rows[@]})) || { echo "Invalid room number."; exit 2; }
+      IFS='|' read -r target _ <<<"${rows[$((choice-1))]}"
+    else
+      target="$choice"
+    fi
   fi
 
   echo
