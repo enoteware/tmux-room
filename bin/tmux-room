@@ -412,7 +412,7 @@ print_all_devices() {
     fi
     [[ "$label" == "$(get_device_name)" ]] && continue
     echo
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 -- "$target" "TMUX_ROOM_DEVICE=$label tmux-room --list"; then
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" "TMUX_ROOM_DEVICE=$label tmux-room --list"; then
       echo "DEVICE: $label [unreachable]"
     fi
   done < "$TMUX_ROOM_HOSTS_FILE"
@@ -475,7 +475,7 @@ if [[ "${1:-}" == "--kill" && "${2:-}" == *:* ]]; then
   fi
   remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
   command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote termination." >&2; exit 127; }
-  exec ssh -t -- "$remote" tmux-room --kill "$target"
+  exec ssh -t "$remote" tmux-room --kill "$target"
 fi
 
 # Remote attachment needs SSH only; it does not require local tmux or Python.
@@ -489,7 +489,7 @@ if [[ "${1:-}" == *:* ]]; then
   remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
   command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote attachment." >&2; exit 127; }
   echo "Attaching to $target on $device. Detach with Ctrl-b then d."
-  exec ssh -t -- "$remote" tmux-room "$target"
+  exec ssh -t "$remote" tmux-room "$target"
 fi
 
 require_local_dependencies

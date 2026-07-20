@@ -113,7 +113,7 @@ assert_contains "$all_output" "remote-review"
 
 SSH_LOG="$MOCK/ssh.log"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" mini:alpha >/dev/null
-assert_contains "$(<"$SSH_LOG")" "-t -- mini-host tmux-room alpha"
+assert_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room alpha"
 
 : > "$TMUX_LOG"
 cancel_one=$(printf 'wrong-room\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha)
@@ -144,7 +144,7 @@ assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
 
 : > "$SSH_LOG"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --kill mini:alpha >/dev/null
-assert_contains "$(<"$SSH_LOG")" "-t -- mini-host tmux-room --kill alpha"
+assert_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room --kill alpha"
 
 BAD_HOSTS="$MOCK/bad-hosts"
 printf 'bad -oProxyCommand\n' > "$BAD_HOSTS"
