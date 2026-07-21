@@ -10,15 +10,56 @@ permissions:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install ShellCheck
+        with:
+          persist-credentials: false
+
+      - name: Install test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck tmux
+
+      - name: Install test dependencies
         if: runner.os == 'macOS'
-        run: brew install shellcheck
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install shellcheck tmux
+
+      - name: Verify real tmux coverage prerequisites
+        run: |
+          command -v tmux
+          tmux -V
+
+      - name: Reject prohibited dash characters
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          markers = (bytes.fromhex("e28093"), bytes.fromhex("e28094"))
+          failures = []
+          tracked = subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0")
+          for raw_path in tracked:
+              if not raw_path:
+                  continue
+              path = Path(os.fsdecode(raw_path))
+              data = path.read_bytes()
+              if any(marker in data for marker in markers):
+                  failures.append(str(path))
+
+          if failures:
+              raise SystemExit("prohibited U+2013/U+2014 character in: " + ", ".join(failures))
+          PY
+
       - name: ShellCheck
         run: shellcheck bin/tmux-room install.sh tests/test.sh
+
       - name: Tests
-        run: bash tests/test.sh
+        run: /bin/bash tests/test.sh
