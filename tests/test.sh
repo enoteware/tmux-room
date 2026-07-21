@@ -33,6 +33,13 @@ for number, raw in enumerate(sys.stdin.read().splitlines(), 1):
         raise SystemExit("line %d is %d columns, expected at most %d: %r" % (number, width, limit, line))
 ' "$2" || fail "output exceeded $2 columns"
 }
+normalize_wrapped_output() {
+  printf '%s' "$1" | /usr/bin/python3 -c '
+import sys
+
+print(" ".join(line.strip() for line in sys.stdin.read().splitlines() if line.strip()))
+'
+}
 assert_filtered_screen() {
   printf '%s' "$1" | /usr/bin/python3 -c '
 import re
@@ -514,6 +521,28 @@ wide_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=120 TMUX_ROOM_DEVICE=
 assert_contains "$wide_output" "LAST ACTIVE"
 assert_contains "$wide_output" "NOTE"
 assert_max_display_width "$wide_output" 120
+
+DETAIL_NOW=$(date +%s)
+for detail_width in 20 24 40 50 60 80; do
+  detail_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS="$detail_width" TMUX_ROOM_DEVICE=devbox \
+    TMUX_META_DRIVER=codex TMUX_META_STATE=needs_input TMUX_META_STATE_AT="$DETAIL_NOW" \
+    TMUX_META_NOTE="mobile 室 status needs review" TMUX_META_PINNED=1 TMUX_META_PROTECTED=0 \
+    "$SCRIPT" --inspect alpha)
+  assert_max_display_width "$detail_output" "$detail_width"
+  assert_contains "$detail_output" "METADATA:"
+  assert_contains "$detail_output" "PATH:"
+  ((detail_width < 40)) && continue
+  detail_normalized=$(normalize_wrapped_output "$detail_output")
+  assert_contains "$detail_normalized" "ROOM DETAILS ROOM: alpha [attached] · 2 windows · #1"
+  assert_contains "$detail_normalized" "METADATA: driver codex · state needs_input · pinned yes · protected no"
+  assert_contains "$detail_normalized" "NOTE: mobile 室 status needs review"
+  assert_contains "$detail_normalized" "AGENTS: Claude · fable5 · effort low · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · effort medium · started 2026-07-20 01:34 · running 8m"
+  assert_contains "$detail_normalized" "REPO: knowledge-hub · BRANCH: feature/mobile-ui"
+  assert_contains "$detail_normalized" "PATH: /work/knowledge-hub"
+done
+
+wide_detail_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=120 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --inspect alpha)
+assert_contains "$wide_detail_output" "    AGENTS: Claude · fable5 · effort low · started 2026-07-20 01:00 · running 42m; Codex · gpt-5.6 · effort medium · started 2026-07-20 01:34 · running 8m"
 
 attention_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=120 TMUX_TWO_ROOMS=1 TMUX_PIPE_ROOM=1 TMUX_ATTENTION_FIXTURE=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
 assert_contains "$attention_output" "!needs_input"

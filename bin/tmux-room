@@ -645,19 +645,21 @@ session_details() {
   [[ "$metadata_pinned" == "1" ]] && pinned_label="yes" || pinned_label="no"
   [[ "$metadata_protected" == "1" ]] && protected_label="yes" || protected_label="no"
 
-  printf '  ROOM: %s [%s] · %s %s · #%s\n' "$display_name" "$status" "$windows" "$window_word" "$index"
-  printf '    METADATA: driver %s · state %s · pinned %s · protected %s\n' "$safe_driver" "$safe_state" "$pinned_label" "$protected_label"
-  [[ -n "$safe_note" ]] && printf '    NOTE: %s\n' "$safe_note"
-  printf '    AGENTS: %s\n' "$agent_summary"
-  printf '    OPENED: %s · LAST ACTIVE: %s\n' "$opened" "$active"
-  printf '    REPO: %s · BRANCH: %s\n' "$repo_names" "$branches"
-  if ((resource_available == 1)); then
-    printf '    SUMMED RSS SNAPSHOT: %s MB%s · PROCESSES SNAPSHOT: %s\n' "$memory_mb" "$memory_flag" "$process_count"
-  else
-    printf '    RESOURCE SNAPSHOT: unavailable\n'
-  fi
-  printf '    CONTEXT: unavailable (agent CLI does not expose it safely)\n'
-  printf '    PATH: %s\n' "$first_path"
+  {
+    printf '  ROOM: \t%s [%s] · %s %s · #%s\n' "$display_name" "$status" "$windows" "$window_word" "$index"
+    printf '    METADATA: \tdriver %s · state %s · pinned %s · protected %s\n' "$safe_driver" "$safe_state" "$pinned_label" "$protected_label"
+    [[ -n "$safe_note" ]] && printf '    NOTE: \t%s\n' "$safe_note"
+    printf '    AGENTS: \t%s\n' "$agent_summary"
+    printf '    OPENED: \t%s · LAST ACTIVE: %s\n' "$opened" "$active"
+    printf '    REPO: \t%s · BRANCH: %s\n' "$repo_names" "$branches"
+    if ((resource_available == 1)); then
+      printf '    SUMMED RSS SNAPSHOT: \t%s MB%s · PROCESSES SNAPSHOT: %s\n' "$memory_mb" "$memory_flag" "$process_count"
+    else
+      printf '    RESOURCE SNAPSHOT: \tunavailable\n'
+    fi
+    printf '    CONTEXT: \tunavailable (agent CLI does not expose it safely)\n'
+    printf '    PATH: \t%s\n' "$first_path"
+  } | render_detail_rows
 }
 
 load_compact_agent_inventory() {
@@ -781,6 +783,86 @@ terminal_columns() {
   ((value < 20)) && value=20
   ((value > 240)) && value=240
   printf '%s' "$value"
+}
+
+render_detail_rows() {
+  local width
+  width=$(terminal_columns)
+  TMUX_ROOM_DETAIL_WIDTH="$width" python3 -c '
+import os
+import sys
+import unicodedata
+
+width = max(20, min(240, int(os.environ.get("TMUX_ROOM_DETAIL_WIDTH", "120"))))
+
+def clean(value):
+    return "".join(ch for ch in value if ch.isprintable() and not unicodedata.category(ch).startswith("C"))
+
+def char_width(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+def cell_width(value):
+    return sum(char_width(ch) for ch in value)
+
+def take_chunk(value, limit):
+    value = value.lstrip()
+    if not value or cell_width(value) <= limit:
+        return value, ""
+    used = 0
+    last_space = -1
+    cut = 0
+    for index, ch in enumerate(value):
+        size = char_width(ch)
+        if used + size > limit:
+            break
+        used += size
+        cut = index + 1
+        if ch.isspace():
+            last_space = index
+    if last_space > 0:
+        return value[:last_space].rstrip(), value[last_space + 1:].lstrip()
+    if cut <= 0:
+        cut = 1
+    return value[:cut], value[cut:].lstrip()
+
+def emit(prefix, value):
+    prefix = clean(prefix)
+    value = clean(value)
+    if width >= 110:
+        print(prefix + value)
+        return
+
+    prefix_width = cell_width(prefix)
+    leading = len(prefix) - len(prefix.lstrip(" "))
+    if prefix_width >= width:
+        continuation = " " * min(leading, width - 1)
+        first_prefix = continuation
+        value = prefix.lstrip(" ") + value
+    else:
+        continuation_width = prefix_width if width - prefix_width >= 12 else min(leading, 4)
+        continuation = " " * continuation_width
+        first_prefix = prefix
+
+    remaining = value
+    current_prefix = first_prefix
+    while True:
+        available = max(1, width - cell_width(current_prefix))
+        chunk, remaining = take_chunk(remaining, available)
+        print(current_prefix + chunk)
+        if not remaining:
+            break
+        current_prefix = continuation
+
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    if "\t" in raw:
+        prefix, value = raw.split("\t", 1)
+    else:
+        prefix, value = "", raw
+    emit(prefix, value)
+'
 }
 
 prepare_local_view() {
