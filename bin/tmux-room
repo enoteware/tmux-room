@@ -5,10 +5,18 @@ TMUX_ROOM_VERSION="0.3.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
+TMUX_ROOM_SCHEMA="tmux-room.inventory"
+TMUX_ROOM_SCHEMA_VERSION=1
+TMUX_ROOM_OPTION_DRIVER='@tmux_room_driver'
+TMUX_ROOM_OPTION_STATE='@tmux_room_state'
+TMUX_ROOM_OPTION_STATE_AT='@tmux_room_state_at'
+TMUX_ROOM_OPTION_NOTE='@tmux_room_note'
+TMUX_ROOM_OPTION_PINNED='@tmux_room_pinned'
+TMUX_ROOM_OPTION_PROTECTED='@tmux_room_protected'
 
 usage() {
   cat <<'EOF'
-tmux-room — device-aware tmux agent room picker
+tmux-room: device-aware tmux agent room picker
 
 Usage:
   tmux-room                       Arrow-key picker (Enter inspect, x close, q quit)
@@ -16,6 +24,14 @@ Usage:
   tmux-room device:room           Attach to a room on a configured device
   tmux-room --list                Show compact local room table
   tmux-room --all                 Show compact local and SSH-device tables
+  tmux-room --json [room]         Print the versioned local JSON inventory
+  tmux-room --json device:room    Print one remote room as JSON
+  tmux-room --inspect <room>      Inspect a local room without attaching
+  tmux-room --inspect device:room Inspect a remote room without attaching
+  tmux-room --new <room> [opts]   Create a detached room with optional metadata
+  tmux-room --rename <old> <new>  Rename a room using its immutable ID
+  tmux-room --metadata <room> ... Update public room metadata
+  tmux-room --cleanup-stale       Review and confirm stale detached room cleanup
   tmux-room --kill <room>         Inspect and double-confirm killing a local room
   tmux-room --kill device:room    Double-confirm killing a configured remote room
   tmux-room --version             Print the installed version
@@ -31,11 +47,128 @@ Format (one device per line):
 
 Set a friendly local name in ~/.config/tmux-room/device or TMUX_ROOM_DEVICE.
 Detach from tmux with Ctrl-b then d.
+
+Metadata options for --new and --metadata:
+  --driver <name>                 Set the provider-neutral room driver
+  --state <value>                 running, idle, needs_input, failed, completed,
+                                  or ended
+  --note <text>                   Set a short public note
+  --pinned / --unpinned           Set the public pinned flag
+  --protected / --unprotected     Set the termination protection flag
+  --clear-driver                  Restore the honest "unknown" default
+  --clear-state                   Restore the honest "unknown" default
+  --clear-note                    Remove the public note
+
+Workspace options for --new:
+  --cwd <existing-directory>      Start the room in this directory
+  --agent <name>                  Start claude, codex, grok, gemini, cursor,
+                                  or hermes without accepting shell commands
+
+Cleanup options:
+  --days <count>                  Minimum inactive age (default: 7)
 EOF
 }
 
 sanitize_text() {
   printf '%s' "$1" | python3 -c 'import sys, unicodedata; s=sys.stdin.read(); sys.stdout.write("".join(ch for ch in s if ch.isprintable() and not unicodedata.category(ch).startswith("C")))'
+}
+
+valid_portable_room_name() {
+  [[ -n "$1" && "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+valid_local_room_name() {
+  [[ -n "$1" ]] && valid_metadata_text "$1"
+}
+
+valid_metadata_token() {
+  [[ -n "$1" && ${#1} -le 128 && "$1" =~ ^[A-Za-z0-9._:/-]+$ ]]
+}
+
+valid_metadata_text() {
+  local value="$1" clean
+  ((${#value} <= 500)) || return 1
+  clean=$(sanitize_text "$value")
+  [[ "$clean" == "$value" ]]
+}
+
+normalize_state() {
+  case "$1" in
+    running|idle|needs_input|failed|completed|ended|stale|unknown) printf '%s' "$1" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+state_ttl_seconds() {
+  local value="${TMUX_ROOM_STATE_TTL_SECONDS:-300}"
+  if [[ "$value" =~ ^[0-9]+$ ]] && ((10#$value >= 1)); then
+    printf '%s' "$((10#$value))"
+  else
+    printf '300'
+  fi
+}
+
+metadata_load() {
+  local session_id="$1" raw clean now ttl
+  metadata_driver="unknown"
+  metadata_state="unknown"
+  metadata_state_updated_at=""
+  metadata_state_age_seconds=""
+  metadata_state_fresh=0
+  metadata_note=""
+  metadata_pinned=0
+  metadata_protected=0
+
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_DRIVER" 2>/dev/null); then
+    clean=$(sanitize_text "$raw")
+    clean="${clean:0:128}"
+    [[ -n "$clean" ]] && metadata_driver="$clean"
+  fi
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_STATE" 2>/dev/null); then
+    metadata_state=$(normalize_state "$raw")
+  fi
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_STATE_AT" 2>/dev/null); then
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+      metadata_state_updated_at="$raw"
+      now=$(date +%s)
+      ttl=$(state_ttl_seconds)
+      if ((raw <= now)); then
+        metadata_state_age_seconds=$((now - raw))
+        if ((metadata_state_age_seconds <= ttl)); then
+          metadata_state_fresh=1
+        fi
+      fi
+    fi
+  fi
+  case "$metadata_state" in
+    running|idle|needs_input)
+      [[ "$metadata_state_fresh" == "1" ]] || metadata_state="stale"
+      ;;
+    failed|completed|ended) ;;
+    *) metadata_state_fresh=0 ;;
+  esac
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_NOTE" 2>/dev/null); then
+    clean=$(sanitize_text "$raw")
+    metadata_note="${clean:0:500}"
+  fi
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_PINNED" 2>/dev/null); then
+    clean=$(sanitize_text "$raw")
+    case "$clean" in 1|on|yes|true) metadata_pinned=1 ;; esac
+  fi
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_PROTECTED" 2>/dev/null); then
+    clean=$(sanitize_text "$raw")
+    case "$clean" in 1|on|yes|true) metadata_protected=1 ;; esac
+  fi
+}
+
+session_identity() {
+  tmux display-message -p -t "$1:" '#{session_id}|#{session_name}' 2>/dev/null || true
+}
+
+revalidate_session() {
+  local session_id="$1" expected_name="$2" current_identity
+  current_identity=$(session_identity "$session_id")
+  [[ "$current_identity" == "$session_id|$expected_name" ]]
 }
 
 get_device_name() {
@@ -326,10 +459,46 @@ PY
 }
 
 load_rows() {
+  local session_id name windows attached created activity resolved_id
   rows=()
-  while IFS= read -r row; do
-    [[ -n "$row" ]] && rows+=("$row")
-  done < <(tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}|#{session_id}' 2>/dev/null | sort -t'|' -k1,1)
+  room_names=()
+  room_windows=()
+  room_attached=()
+  room_created=()
+  room_activity=()
+  room_ids=()
+  while IFS= read -r session_id; do
+    [[ "$session_id" =~ ^\$[0-9]+$ ]] || continue
+    resolved_id=$(tmux display-message -p -t "$session_id:" '#{session_id}' 2>/dev/null || true)
+    [[ "$resolved_id" == "$session_id" ]] || continue
+    name=$(tmux display-message -p -t "$session_id:" '#{session_name}' 2>/dev/null || true)
+    windows=$(tmux display-message -p -t "$session_id:" '#{session_windows}' 2>/dev/null || true)
+    attached=$(tmux display-message -p -t "$session_id:" '#{session_attached}' 2>/dev/null || true)
+    created=$(tmux display-message -p -t "$session_id:" '#{session_created}' 2>/dev/null || true)
+    activity=$(tmux display-message -p -t "$session_id:" '#{session_activity}' 2>/dev/null || true)
+    [[ -n "$name" && "$windows" =~ ^[0-9]+$ && "$attached" =~ ^[0-9]+$ && "$created" =~ ^[0-9]+$ && "$activity" =~ ^[0-9]+$ ]] || continue
+    rows+=("$session_id")
+    room_names+=("$name")
+    room_windows+=("$windows")
+    room_attached+=("$attached")
+    room_created+=("$created")
+    room_activity+=("$activity")
+    room_ids+=("$session_id")
+  done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null)
+}
+
+find_room_row() {
+  local wanted="$1" i
+  found_session_id=""
+  load_rows
+  for i in "${!rows[@]}"; do
+    if [[ "${room_names[i]}" == "$wanted" ]]; then
+      found_session_id="${room_ids[i]}"
+      return 0
+    fi
+  done
+  found_session_id=""
+  return 1
 }
 
 session_details() {
@@ -337,6 +506,7 @@ session_details() {
   local status display_name pid path command title roots hints first_path repo_names branches top branch
   local agent_lines agent name_model age started effort agent_summary opened active window_word
   local resource_line memory_mb process_count memory_flag resource_available
+  local safe_driver safe_state safe_note pinned_label protected_label
 
   [[ "$attached" == "0" ]] && status="detached" || status="attached"
   [[ "$windows" == "1" ]] && window_word="window" || window_word="windows"
@@ -393,8 +563,16 @@ session_details() {
   branches=$(sanitize_text "$branches")
   first_path=$(sanitize_text "$first_path")
   agent_summary=$(sanitize_text "$agent_summary")
+  metadata_load "$session_id"
+  safe_driver=$(sanitize_text "$metadata_driver")
+  safe_state=$(sanitize_text "$metadata_state")
+  safe_note=$(sanitize_text "$metadata_note")
+  [[ "$metadata_pinned" == "1" ]] && pinned_label="yes" || pinned_label="no"
+  [[ "$metadata_protected" == "1" ]] && protected_label="yes" || protected_label="no"
 
   printf '  ROOM: %s [%s] · %s %s · #%s\n' "$display_name" "$status" "$windows" "$window_word" "$index"
+  printf '    METADATA: driver %s · state %s · pinned %s · protected %s\n' "$safe_driver" "$safe_state" "$pinned_label" "$protected_label"
+  [[ -n "$safe_note" ]] && printf '    NOTE: %s\n' "$safe_note"
   printf '    AGENTS: %s\n' "$agent_summary"
   printf '    OPENED: %s · LAST ACTIVE: %s\n' "$opened" "$active"
   printf '    REPO: %s · BRANCH: %s\n' "$repo_names" "$branches"
@@ -535,7 +713,11 @@ print_local_rooms() {
   printf '  #  %-28s %-24s %-9s %7s  %s\n' 'ROOM' 'PROVIDER/MODEL' 'STATE' 'WINDOWS' 'LAST ACTIVE'
   printf '  -- %-28s %-24s --------- -------  ----------------\n' '----------------------------' '------------------------'
   for i in "${!rows[@]}"; do
-    IFS='|' read -r name windows attached created activity session_id <<<"${rows[$i]}"
+    name="${room_names[i]}"
+    windows="${room_windows[i]}"
+    attached="${room_attached[i]}"
+    activity="${room_activity[i]}"
+    session_id="${room_ids[i]}"
     [[ "$attached" == "0" ]] && status="detached" || status="attached"
     display_name=$(sanitize_text "$name")
     agent_label=$(compact_agent_label "$session_id")
@@ -546,12 +728,16 @@ print_local_rooms() {
 }
 
 print_room_details() {
-  local room="$1" row name windows attached created activity session_id index
+  local room="$1" name windows attached created activity session_id index i
   load_rows
-  index=0
-  for row in "${rows[@]}"; do
-    index=$((index + 1))
-    IFS='|' read -r name windows attached created activity session_id <<<"$row"
+  for i in "${!rows[@]}"; do
+    index=$((i + 1))
+    name="${room_names[i]}"
+    windows="${room_windows[i]}"
+    attached="${room_attached[i]}"
+    created="${room_created[i]}"
+    activity="${room_activity[i]}"
+    session_id="${room_ids[i]}"
     [[ "$name" == "$room" ]] || continue
     echo "ROOM DETAILS"
     selected_session_id="$session_id"
@@ -562,19 +748,130 @@ print_room_details() {
   return 1
 }
 
-kill_local_room() {
-  local room="$1" row name windows attached created activity session_id confirm final found
-  local current_identity roots pid final_resource final_memory final_processes
-  [[ "$room" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Invalid room name." >&2; return 2; }
-  if ! tmux has-session -t "=$room" 2>/dev/null; then
-    echo "Room not found: $room" >&2
-    return 1
+inspect_local_room() {
+  local room="$1"
+  valid_local_room_name "$room" || { echo "Invalid room name." >&2; return 2; }
+  print_room_details "$room"
+}
+
+print_json_inventory() {
+  local wanted="${1:-}" source_label="${TMUX_ROOM_SOURCE_LABEL:-local}"
+  local name windows attached created activity session_id first_path first i
+
+  if [[ -n "$wanted" ]]; then
+    valid_local_room_name "$wanted" || { echo "Invalid room name." >&2; return 2; }
+    if ! find_room_row "$wanted"; then
+      echo "Room not found: $wanted" >&2
+      return 1
+    fi
+  else
+    load_rows
   fi
+
+  TMUX_ROOM_JSON_SCHEMA="$TMUX_ROOM_SCHEMA" \
+  TMUX_ROOM_JSON_SCHEMA_VERSION="$TMUX_ROOM_SCHEMA_VERSION" \
+  TMUX_ROOM_JSON_GENERATED_AT="$(date +%s)" \
+  TMUX_ROOM_JSON_DEVICE="$(get_device_name)" \
+  TMUX_ROOM_JSON_SOURCE="$source_label" python3 - <<'PY'
+import json
+import os
+
+document = {
+    'schema': os.environ['TMUX_ROOM_JSON_SCHEMA'],
+    'schema_version': int(os.environ['TMUX_ROOM_JSON_SCHEMA_VERSION']),
+    'generated_at': int(os.environ['TMUX_ROOM_JSON_GENERATED_AT']),
+    'device': {
+        'name': os.environ['TMUX_ROOM_JSON_DEVICE'],
+        'source': os.environ['TMUX_ROOM_JSON_SOURCE'],
+    },
+}
+encoded = json.dumps(document, ensure_ascii=True, separators=(',', ':'))
+print(encoded[:-1] + ',"rooms":[', end='')
+PY
+
+  first=1
+  for i in "${!rows[@]}"; do
+    name="${room_names[i]}"
+    windows="${room_windows[i]}"
+    attached="${room_attached[i]}"
+    created="${room_created[i]}"
+    activity="${room_activity[i]}"
+    session_id="${room_ids[i]}"
+    [[ -z "$wanted" || "$name" == "$wanted" ]] || continue
+    metadata_load "$session_id"
+    first_path=$(tmux list-panes -s -t "$session_id" -F '#{pane_current_path}' 2>/dev/null | sed -n '1p')
+    ((first == 1)) || printf ','
+    first=0
+    TMUX_ROOM_JSON_ID="$session_id" \
+    TMUX_ROOM_JSON_NAME="$name" \
+    TMUX_ROOM_JSON_WINDOWS="$windows" \
+    TMUX_ROOM_JSON_ATTACHED="$attached" \
+    TMUX_ROOM_JSON_CREATED="$created" \
+    TMUX_ROOM_JSON_ACTIVITY="$activity" \
+    TMUX_ROOM_JSON_PATH="$first_path" \
+    TMUX_ROOM_JSON_DRIVER="$metadata_driver" \
+    TMUX_ROOM_JSON_STATE="$metadata_state" \
+    TMUX_ROOM_JSON_STATE_UPDATED_AT="$metadata_state_updated_at" \
+    TMUX_ROOM_JSON_STATE_AGE_SECONDS="$metadata_state_age_seconds" \
+    TMUX_ROOM_JSON_STATE_FRESH="$metadata_state_fresh" \
+    TMUX_ROOM_JSON_NOTE="$metadata_note" \
+    TMUX_ROOM_JSON_PINNED="$metadata_pinned" \
+    TMUX_ROOM_JSON_PROTECTED="$metadata_protected" python3 - <<'PY'
+import json
+import os
+
+def integer(name):
+    try:
+        return int(os.environ.get(name, '0'))
+    except ValueError:
+        return 0
+
+def optional_integer(name):
+    raw = os.environ.get(name, '')
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+room = {
+    'id': os.environ.get('TMUX_ROOM_JSON_ID', ''),
+    'name': os.environ.get('TMUX_ROOM_JSON_NAME', ''),
+    'windows': integer('TMUX_ROOM_JSON_WINDOWS'),
+    'attached': integer('TMUX_ROOM_JSON_ATTACHED') > 0,
+    'created_at': integer('TMUX_ROOM_JSON_CREATED'),
+    'activity_at': integer('TMUX_ROOM_JSON_ACTIVITY'),
+    'path': os.environ.get('TMUX_ROOM_JSON_PATH', ''),
+    'metadata': {
+        'driver': os.environ.get('TMUX_ROOM_JSON_DRIVER', 'unknown'),
+        'state': os.environ.get('TMUX_ROOM_JSON_STATE', 'unknown'),
+        'state_updated_at': optional_integer('TMUX_ROOM_JSON_STATE_UPDATED_AT'),
+        'state_age_seconds': optional_integer('TMUX_ROOM_JSON_STATE_AGE_SECONDS'),
+        'fresh': os.environ.get('TMUX_ROOM_JSON_STATE_FRESH') == '1',
+        'note': os.environ.get('TMUX_ROOM_JSON_NOTE', ''),
+        'pinned': os.environ.get('TMUX_ROOM_JSON_PINNED') == '1',
+        'protected': os.environ.get('TMUX_ROOM_JSON_PROTECTED') == '1',
+    },
+}
+print(json.dumps(room, ensure_ascii=True, separators=(',', ':')), end='')
+PY
+  done
+  printf ']}\n'
+}
+
+kill_local_room() {
+  local room="$1" name windows attached created activity session_id confirm final found i
+  local current_identity roots pid final_resource final_memory final_processes
+  valid_local_room_name "$room" || { echo "Invalid room name." >&2; return 2; }
 
   load_rows
   found=0
-  for row in "${rows[@]}"; do
-    IFS='|' read -r name windows attached created activity session_id <<<"$row"
+  for i in "${!rows[@]}"; do
+    name="${room_names[i]}"
+    windows="${room_windows[i]}"
+    attached="${room_attached[i]}"
+    created="${room_created[i]}"
+    activity="${room_activity[i]}"
+    session_id="${room_ids[i]}"
     [[ "$name" == "$room" ]] || continue
     echo "Room selected for termination:"
     session_details "$name" "$windows" "$attached" "$created" "$activity" "$session_id" 1
@@ -583,21 +880,32 @@ kill_local_room() {
   done
   ((found == 1)) || { echo "Unable to inspect room: $room" >&2; return 1; }
 
+  metadata_load "$session_id"
+  if [[ "$metadata_protected" == "1" ]]; then
+    echo "Kill refused: room is protected. Use --metadata $room --unprotected first." >&2
+    return 1
+  fi
+
   echo
   echo "WARNING: Killing this room asks tmux to terminate the session and its panes."
   echo "Detached, daemonized, reparented, or signal-ignoring processes may survive."
-  if ! read -r -p "Confirmation 1/2 — type the exact room name ($room): " confirm || [[ "$confirm" != "$room" ]]; then
+  if ! read -r -p "Confirmation 1/2: type the exact room name ($room): " confirm || [[ "$confirm" != "$room" ]]; then
     echo "Kill cancelled."
     return 0
   fi
-  if ! read -r -p "Confirmation 2/2 — type KILL: " final || [[ "$final" != "KILL" ]]; then
+  if ! read -r -p "Confirmation 2/2: type KILL: " final || [[ "$final" != "KILL" ]]; then
     echo "Kill cancelled."
     return 0
   fi
 
-  current_identity=$(tmux display-message -p -t "=$room" '#{session_id}|#{session_name}' 2>/dev/null || true)
+  current_identity=$(session_identity "$session_id")
   if [[ "$current_identity" != "$session_id|$room" ]]; then
     echo "Kill aborted: room identity changed after inspection."
+    return 1
+  fi
+  metadata_load "$session_id"
+  if [[ "$metadata_protected" == "1" ]]; then
+    echo "Kill aborted: room became protected after confirmation."
     return 1
   fi
 
@@ -613,14 +921,363 @@ kill_local_room() {
     echo "Final resource snapshot: unavailable"
   fi
 
-  current_identity=$(tmux display-message -p -t "=$room" '#{session_id}|#{session_name}' 2>/dev/null || true)
+  current_identity=$(session_identity "$session_id")
   if [[ "$current_identity" != "$session_id|$room" ]]; then
     echo "Kill aborted: room identity changed during final snapshot."
+    return 1
+  fi
+  metadata_load "$session_id"
+  if [[ "$metadata_protected" == "1" ]]; then
+    echo "Kill aborted: room became protected during final snapshot."
     return 1
   fi
 
   tmux kill-session -t "$session_id"
   echo "Killed room: $room"
+}
+
+parse_metadata_args() {
+  metadata_arg_count=0
+  metadata_driver_mode="keep"
+  metadata_driver_value=""
+  metadata_state_mode="keep"
+  metadata_state_value=""
+  metadata_note_mode="keep"
+  metadata_note_value=""
+  metadata_pinned_mode="keep"
+  metadata_protected_mode="keep"
+
+  while (($# > 0)); do
+    case "$1" in
+      --driver)
+        (($# >= 2)) || { echo "--driver requires a value." >&2; return 2; }
+        valid_metadata_token "$2" || { echo "Invalid driver. Use 1 to 128 letters, numbers, dots, slashes, colons, underscores, or hyphens." >&2; return 2; }
+        metadata_driver_mode="set"
+        metadata_driver_value="$2"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift 2
+        ;;
+      --clear-driver)
+        metadata_driver_mode="unset"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift
+        ;;
+      --state)
+        (($# >= 2)) || { echo "--state requires a value." >&2; return 2; }
+        case "$2" in
+          running|idle|needs_input|failed|completed|ended) ;;
+          *)
+            echo "Invalid state: $2" >&2
+            echo "Use running, idle, needs_input, failed, completed, or ended." >&2
+            return 2
+            ;;
+        esac
+        metadata_state_mode="set"
+        metadata_state_value="$2"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift 2
+        ;;
+      --clear-state)
+        metadata_state_mode="unset"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift
+        ;;
+      --note)
+        (($# >= 2)) || { echo "--note requires a value." >&2; return 2; }
+        valid_metadata_text "$2" || { echo "Invalid note. Use at most 500 printable characters." >&2; return 2; }
+        metadata_note_mode="set"
+        metadata_note_value="$2"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift 2
+        ;;
+      --clear-note)
+        metadata_note_mode="unset"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift
+        ;;
+      --pinned)
+        metadata_pinned_mode="set"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift
+        ;;
+      --unpinned)
+        metadata_pinned_mode="unset"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift
+        ;;
+      --protected)
+        metadata_protected_mode="set"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift
+        ;;
+      --unprotected)
+        metadata_protected_mode="unset"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift
+        ;;
+      *)
+        echo "Unknown metadata option: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+}
+
+apply_metadata_option() {
+  local session_id="$1" room="$2" mode="$3" option="$4" value="${5:-}"
+  [[ "$mode" != "keep" ]] || return 0
+  if ! revalidate_session "$session_id" "$room"; then
+    echo "Metadata update aborted: room identity changed." >&2
+    return 1
+  fi
+  case "$mode" in
+    set) tmux set-option -t "$session_id" "$option" "$value" ;;
+    unset) tmux set-option -u -t "$session_id" "$option" ;;
+    *) echo "Internal error: invalid metadata operation." >&2; return 1 ;;
+  esac
+}
+
+apply_parsed_metadata() {
+  local session_id="$1" room="$2" state_at_mode="keep" state_at_value=""
+  apply_metadata_option "$session_id" "$room" "$metadata_driver_mode" "$TMUX_ROOM_OPTION_DRIVER" "$metadata_driver_value" || return $?
+  apply_metadata_option "$session_id" "$room" "$metadata_state_mode" "$TMUX_ROOM_OPTION_STATE" "$metadata_state_value" || return $?
+  if [[ "$metadata_state_mode" == "set" ]]; then
+    state_at_mode="set"
+    state_at_value=$(date +%s)
+  elif [[ "$metadata_state_mode" == "unset" ]]; then
+    state_at_mode="unset"
+  fi
+  apply_metadata_option "$session_id" "$room" "$state_at_mode" "$TMUX_ROOM_OPTION_STATE_AT" "$state_at_value" || return $?
+  apply_metadata_option "$session_id" "$room" "$metadata_note_mode" "$TMUX_ROOM_OPTION_NOTE" "$metadata_note_value" || return $?
+  apply_metadata_option "$session_id" "$room" "$metadata_pinned_mode" "$TMUX_ROOM_OPTION_PINNED" "1" || return $?
+  apply_metadata_option "$session_id" "$room" "$metadata_protected_mode" "$TMUX_ROOM_OPTION_PROTECTED" "1" || return $?
+  if ! revalidate_session "$session_id" "$room"; then
+    echo "Metadata update could not be verified because the room identity changed." >&2
+    return 1
+  fi
+}
+
+new_local_room() {
+  local room="$1" cwd="" agent="" session_id
+  local -a metadata_args new_command
+  shift
+  valid_portable_room_name "$room" || { echo "Invalid room name." >&2; return 2; }
+  metadata_args=()
+  while (($# > 0)); do
+    case "$1" in
+      --cwd)
+        (($# >= 2)) || { echo "--cwd requires an existing directory." >&2; return 2; }
+        valid_metadata_text "$2" && [[ -d "$2" ]] || { echo "Directory not found or unsafe: $(sanitize_text "$2")" >&2; return 2; }
+        cwd=$(cd -- "$2" 2>/dev/null && pwd -P) || { echo "Cannot access directory: $(sanitize_text "$2")" >&2; return 2; }
+        shift 2
+        ;;
+      --agent)
+        (($# >= 2)) || { echo "--agent requires a value." >&2; return 2; }
+        case "$2" in claude|codex|grok|gemini|cursor|hermes) agent="$2" ;; *) echo "Unsupported agent: $(sanitize_text "$2")" >&2; return 2 ;; esac
+        shift 2
+        ;;
+      --driver|--state|--note)
+        (($# >= 2)) || { echo "$1 requires a value." >&2; return 2; }
+        metadata_args+=("$1" "$2")
+        shift 2
+        ;;
+      --clear-driver|--clear-state|--clear-note|--pinned|--unpinned|--protected|--unprotected)
+        metadata_args+=("$1")
+        shift
+        ;;
+      *) echo "Unknown room creation option: $1" >&2; return 2 ;;
+    esac
+  done
+  parse_metadata_args "${metadata_args[@]}" || return $?
+  if [[ -n "$agent" ]]; then
+    command -v "$agent" >/dev/null 2>&1 || { echo "Agent command not found: $agent" >&2; return 127; }
+    if [[ "$metadata_driver_mode" == "keep" ]]; then
+      metadata_driver_mode="set"
+      metadata_driver_value="$agent"
+      metadata_arg_count=$((metadata_arg_count + 1))
+    fi
+  fi
+  if find_room_row "$room"; then
+    echo "Room already exists: $room" >&2
+    return 1
+  fi
+  new_command=(tmux new-session -d -P -F '#{session_id}' -s "$room")
+  [[ -n "$cwd" ]] && new_command+=(-c "$cwd")
+  [[ -n "$agent" ]] && new_command+=("$agent")
+  session_id=$("${new_command[@]}")
+  if [[ ! "$session_id" =~ ^\$[0-9]+$ ]]; then
+    echo "Room creation succeeded, but setup failed because tmux did not return a safe immutable ID." >&2
+    echo "Inspect the room before deciding whether to remove it: $room" >&2
+    return 1
+  fi
+  if ! revalidate_session "$session_id" "$room"; then
+    echo "Room creation succeeded, but setup failed because its immutable ID could not be verified: $room" >&2
+    echo "The unverified room was not removed." >&2
+    return 1
+  fi
+  if ! apply_parsed_metadata "$session_id" "$room"; then
+    if revalidate_session "$session_id" "$room" && tmux kill-session -t "$session_id"; then
+      echo "Room creation rolled back after metadata setup failed: $room" >&2
+    else
+      echo "Room creation succeeded, but metadata setup failed and the room could not be safely rolled back: $room" >&2
+    fi
+    return 1
+  fi
+  echo "Created room: $room ($session_id)"
+}
+
+rename_local_room() {
+  local room="$1" new_name="$2" session_id
+  if ! valid_local_room_name "$room" || ! valid_portable_room_name "$new_name"; then
+    echo "Invalid room name." >&2
+    return 2
+  fi
+  [[ "$room" != "$new_name" ]] || { echo "Old and new room names are the same." >&2; return 2; }
+  if ! find_room_row "$room"; then
+    echo "Room not found: $room" >&2
+    return 1
+  fi
+  session_id="$found_session_id"
+  if find_room_row "$new_name"; then
+    echo "Room already exists: $new_name" >&2
+    return 1
+  fi
+  if ! revalidate_session "$session_id" "$room"; then
+    echo "Rename aborted: room identity changed before the command." >&2
+    return 1
+  fi
+  tmux rename-session -t "$session_id" "$new_name"
+  if ! revalidate_session "$session_id" "$new_name"; then
+    echo "Rename could not be verified." >&2
+    return 1
+  fi
+  echo "Renamed room: $room to $new_name ($session_id)"
+}
+
+update_local_metadata() {
+  local room="$1" session_id
+  shift
+  valid_local_room_name "$room" || { echo "Invalid room name." >&2; return 2; }
+  parse_metadata_args "$@" || return $?
+  ((metadata_arg_count > 0)) || { echo "No metadata changes requested." >&2; return 2; }
+  if ! find_room_row "$room"; then
+    echo "Room not found: $room" >&2
+    return 1
+  fi
+  session_id="$found_session_id"
+  apply_parsed_metadata "$session_id" "$room" || return $?
+  metadata_load "$session_id"
+  echo "Updated room metadata: $room ($session_id)"
+  printf '  driver=%s state=%s pinned=%s protected=%s\n' \
+    "$(sanitize_text "$metadata_driver")" "$(sanitize_text "$metadata_state")" \
+    "$metadata_pinned" "$metadata_protected"
+}
+
+cleanup_stale_rooms() {
+  local days=7 now cutoff name windows attached created activity session_id
+  local confirm final phrase i snapshot roots pid final_resource final_memory final_processes
+  local current_identity current_id current_name current_attached current_activity cleaned skipped
+  local -a stale_names stale_ids stale_activities
+
+  while (($# > 0)); do
+    case "$1" in
+      --days)
+        (($# >= 2)) || { echo "--days requires a positive whole number." >&2; return 2; }
+        if [[ ! "$2" =~ ^[0-9]+$ ]] || ((10#$2 < 1 || 10#$2 > 36500)); then
+          echo "--days must be between 1 and 36500." >&2
+          return 2
+        fi
+        days=$((10#$2))
+        shift 2
+        ;;
+      *) echo "Unknown cleanup option: $1" >&2; return 2 ;;
+    esac
+  done
+
+  now=$(date +%s)
+  cutoff=$((now - days * 86400))
+  stale_names=()
+  stale_ids=()
+  stale_activities=()
+  load_rows
+  for i in "${!rows[@]}"; do
+    name="${room_names[i]}"
+    windows="${room_windows[i]}"
+    attached="${room_attached[i]}"
+    created="${room_created[i]}"
+    activity="${room_activity[i]}"
+    session_id="${room_ids[i]}"
+    [[ "$attached" == "0" && "$activity" =~ ^[0-9]+$ ]] || continue
+    ((activity <= cutoff)) || continue
+    metadata_load "$session_id"
+    [[ "$metadata_pinned" == "0" && "$metadata_protected" == "0" ]] || continue
+    stale_names+=("$name")
+    stale_ids+=("$session_id")
+    stale_activities+=("$activity")
+  done
+
+  echo "STALE ROOM REVIEW"
+  echo "Candidates are detached, inactive for at least $days days, unpinned, and unprotected."
+  if ((${#stale_names[@]} == 0)); then
+    echo "No stale rooms are eligible for cleanup."
+    return 0
+  fi
+  printf '  #  %-28s %-8s %s\n' 'ROOM' 'ID' 'LAST ACTIVE'
+  for i in "${!stale_names[@]}"; do
+    printf '  %-2d %-28s %-8s %s\n' "$((i + 1))" "$(sanitize_text "${stale_names[i]}")" "${stale_ids[i]}" "$(format_date "${stale_activities[i]}")"
+  done
+  echo
+  echo "WARNING: Cleanup asks tmux to terminate every listed session and its panes."
+  echo "Pinned, protected, attached, changed, or replaced sessions will be skipped during revalidation."
+  phrase="CLEANUP ${#stale_names[@]}"
+  if ! read -r -p "Confirmation 1/2: type $phrase: " confirm || [[ "$confirm" != "$phrase" ]]; then
+    echo "Cleanup cancelled."
+    return 0
+  fi
+  if ! read -r -p "Confirmation 2/2: type KILL STALE: " final || [[ "$final" != "KILL STALE" ]]; then
+    echo "Cleanup cancelled."
+    return 0
+  fi
+
+  cleaned=0
+  skipped=0
+  for i in "${!stale_names[@]}"; do
+    name="${stale_names[i]}"
+    session_id="${stale_ids[i]}"
+    snapshot=$(tmux display-message -p -t "$session_id:" '#{session_id}|#{session_name}|#{session_attached}|#{session_activity}' 2>/dev/null || true)
+    IFS='|' read -r current_id current_name current_attached current_activity <<<"$snapshot"
+    metadata_load "$session_id"
+    if [[ "$current_id" != "$session_id" || "$current_name" != "$name" || "$current_attached" != "0" || ! "$current_activity" =~ ^[0-9]+$ ]] || ((current_activity > cutoff)) || [[ "$metadata_pinned" != "0" || "$metadata_protected" != "0" ]]; then
+      echo "Skipped changed or protected room: $(sanitize_text "$name")"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    roots=""
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && roots="${roots:+$roots,}$pid"
+    done < <(tmux list-panes -s -t "$session_id" -F '#{pane_pid}' 2>/dev/null)
+    final_resource=$(resource_scan "$roots")
+    IFS=$'\t' read -r final_memory final_processes <<<"$final_resource"
+    if [[ "$final_memory" =~ ^[0-9]+$ && "$final_processes" =~ ^[0-9]+$ ]]; then
+      echo "Final snapshot for $(sanitize_text "$name"): summed RSS $final_memory MB, processes $final_processes"
+    else
+      echo "Final snapshot for $(sanitize_text "$name"): unavailable"
+    fi
+
+    snapshot=$(tmux display-message -p -t "$session_id:" '#{session_id}|#{session_name}|#{session_attached}|#{session_activity}' 2>/dev/null || true)
+    IFS='|' read -r current_id current_name current_attached current_activity <<<"$snapshot"
+    metadata_load "$session_id"
+    if [[ "$current_id" != "$session_id" || "$current_name" != "$name" || "$current_attached" != "0" || ! "$current_activity" =~ ^[0-9]+$ ]] || ((current_activity > cutoff)) || [[ "$metadata_pinned" != "0" || "$metadata_protected" != "0" ]]; then
+      echo "Skipped room changed during final snapshot: $(sanitize_text "$name")"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    tmux kill-session -t "$session_id"
+    echo "Cleaned stale room: $(sanitize_text "$name")"
+    cleaned=$((cleaned + 1))
+  done
+  echo "Cleanup complete: $cleaned cleaned, $skipped skipped."
 }
 
 valid_host_field() {
@@ -702,7 +1359,11 @@ arrow_picker() {
     picker_agents=()
     load_compact_agent_inventory
     for i in "${!rows[@]}"; do
-      IFS='|' read -r name windows attached created activity session_id <<<"${rows[$i]}"
+      name="${room_names[i]}"
+      windows="${room_windows[i]}"
+      attached="${room_attached[i]}"
+      activity="${room_activity[i]}"
+      session_id="${room_ids[i]}"
       [[ "$attached" == "0" ]] && status="detached" || status="attached"
       picker_names[i]=$(sanitize_text "$name")
       picker_windows[i]="$windows"
@@ -740,13 +1401,13 @@ arrow_picker() {
     case "$key" in
       q|Q) return 1 ;;
       x|X)
-        target="${picker_names[selected]}"
+        target="${room_names[selected]}"
         printf '\033[0m\n'
         kill_local_room "$target"
         break
         ;;
       '')
-        target="${picker_names[selected]}"
+        target="${room_names[selected]}"
         return 0
         ;;
     esac
@@ -775,11 +1436,24 @@ case "${1:-}" in
   --update) self_update; exit 0 ;;
 esac
 
+# Remote inspection is read-only and does not allocate a pseudo-terminal.
+if [[ ("${1:-}" == "--inspect" || "${1:-}" == "--json") && "${2:-}" == *:* ]]; then
+  device=${2%%:*}
+  target=${2#*:}
+  if ! valid_host_field "$device" || ! valid_portable_room_name "$target"; then
+    echo "Invalid device or room name." >&2
+    exit 2
+  fi
+  remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
+  command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote inspection." >&2; exit 127; }
+  exec ssh -o BatchMode=yes "$remote" env "TMUX_ROOM_DEVICE=$device" TMUX_ROOM_SOURCE_LABEL=remote tmux-room "$1" "$target"
+fi
+
 # Remote kill runs the same double-confirmation flow on the destination host.
 if [[ "${1:-}" == "--kill" && "${2:-}" == *:* ]]; then
   device=${2%%:*}
   target=${2#*:}
-  if ! valid_host_field "$device" || [[ ! "$target" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  if ! valid_host_field "$device" || ! valid_portable_room_name "$target"; then
     echo "Invalid device or room name." >&2
     exit 2
   fi
@@ -792,7 +1466,7 @@ fi
 if [[ "${1:-}" == *:* ]]; then
   device=${1%%:*}
   target=${1#*:}
-  if ! valid_host_field "$device" || [[ ! "$target" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  if ! valid_host_field "$device" || ! valid_portable_room_name "$target"; then
     echo "Invalid device or room name." >&2
     exit 2
   fi
@@ -807,6 +1481,40 @@ require_local_dependencies
 case "${1:-}" in
   --all) print_all_devices; exit 0 ;;
   --list|-l) print_local_rooms "${TMUX_ROOM_SOURCE_LABEL:-local}"; exit 0 ;;
+  --json)
+    [[ $# -le 2 ]] || { echo "Usage: tmux-room --json [room|device:room]" >&2; exit 2; }
+    print_json_inventory "${2:-}"
+    exit $?
+    ;;
+  --inspect)
+    [[ $# -eq 2 ]] || { echo "Usage: tmux-room --inspect <room|device:room>" >&2; exit 2; }
+    inspect_local_room "$2"
+    exit $?
+    ;;
+  --new)
+    [[ $# -ge 2 ]] || { echo "Usage: tmux-room --new <room> [metadata options]" >&2; exit 2; }
+    room_arg="$2"
+    shift 2
+    new_local_room "$room_arg" "$@"
+    exit $?
+    ;;
+  --rename)
+    [[ $# -eq 3 ]] || { echo "Usage: tmux-room --rename <old> <new>" >&2; exit 2; }
+    rename_local_room "$2" "$3"
+    exit $?
+    ;;
+  --metadata)
+    [[ $# -ge 2 ]] || { echo "Usage: tmux-room --metadata <room> [metadata options]" >&2; exit 2; }
+    room_arg="$2"
+    shift 2
+    update_local_metadata "$room_arg" "$@"
+    exit $?
+    ;;
+  --cleanup-stale)
+    shift
+    cleanup_stale_rooms "$@"
+    exit $?
+    ;;
   --kill)
     [[ $# -eq 2 ]] || { echo "Usage: tmux-room --kill <room|device:room>" >&2; exit 2; }
     kill_local_room "$2"
@@ -827,6 +1535,12 @@ fi
 selected_session_id=""
 if [[ $# -gt 0 ]]; then
   target="$1"
+  valid_local_room_name "$target" || { echo "Invalid room name." >&2; exit 2; }
+  if ! find_room_row "$target"; then
+    echo "Room not found: $target" >&2
+    exit 1
+  fi
+  selected_session_id="$found_session_id"
 else
   update_notice=$(check_for_update)
   if [[ -t 0 && -t 1 || "${TMUX_ROOM_FORCE_ARROW:-0}" == "1" ]]; then
@@ -840,7 +1554,7 @@ else
     [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
     if [[ "$choice" =~ ^[0-9]+$ ]]; then
       ((choice >= 1 && choice <= ${#rows[@]})) || { echo "Invalid room number."; exit 2; }
-      IFS='|' read -r target _ <<<"${rows[$((choice-1))]}"
+      target="${room_names[$((choice - 1))]}"
     else
       target="$choice"
     fi
@@ -856,7 +1570,7 @@ else
     *) echo "Attachment cancelled."; exit 0 ;;
   esac
 
-  current_identity=$(tmux display-message -p -t "=$target" '#{session_id}|#{session_name}' 2>/dev/null || true)
+  current_identity=$(session_identity "$selected_session_id")
   if [[ "$current_identity" != "$selected_session_id|$target" ]]; then
     echo "Attachment aborted: room identity changed after inspection."
     exit 1
