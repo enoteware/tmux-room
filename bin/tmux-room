@@ -116,6 +116,18 @@ state_ttl_seconds() {
   fi
 }
 
+load_exact_tmux_option() {
+  local session_id="$1" option="$2" output
+  loaded_option_is_set=0
+  loaded_option_value=""
+  if output=$(tmux show-options -v -t "$session_id" "$option" 2>/dev/null && printf '\034'); then
+    output="${output%$'\034'}"
+    loaded_option_value="${output%$'\n'}"
+    loaded_option_is_set=1
+  fi
+  return 0
+}
+
 metadata_load() {
   local session_id="$1" raw clean now ttl stamp
   metadata_driver="unknown"
@@ -164,13 +176,13 @@ metadata_load() {
     clean=$(sanitize_text "$raw")
     metadata_note="${clean:0:500}"
   fi
-  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_PINNED" 2>/dev/null); then
-    clean=$(sanitize_text "$raw")
-    case "$clean" in 1|on|yes|true) metadata_pinned=1 ;; esac
+  load_exact_tmux_option "$session_id" "$TMUX_ROOM_OPTION_PINNED"
+  if [[ "$loaded_option_is_set" == "1" && "$loaded_option_value" != "0" ]]; then
+    metadata_pinned=1
   fi
-  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_PROTECTED" 2>/dev/null); then
-    clean=$(sanitize_text "$raw")
-    case "$clean" in 1|on|yes|true) metadata_protected=1 ;; esac
+  load_exact_tmux_option "$session_id" "$TMUX_ROOM_OPTION_PROTECTED"
+  if [[ "$loaded_option_is_set" == "1" && "$loaded_option_value" != "0" ]]; then
+    metadata_protected=1
   fi
 }
 

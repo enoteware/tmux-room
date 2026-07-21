@@ -560,6 +560,27 @@ assert room["metadata"]["protected"] is True
 assert_not_contains "$json_output" "$ESC"
 assert_not_contains "$json_output" "$BIDI"
 
+noncanonical_flags_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox \
+  TMUX_META_PINNED=off TMUX_META_PROTECTED=' 0 ' "$SCRIPT" --json alpha)
+printf '%s' "$noncanonical_flags_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["pinned"] is True
+assert metadata["protected"] is True
+'
+noncanonical_flags_inspect=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox \
+  TMUX_META_PINNED=off TMUX_META_PROTECTED=' 0 ' "$SCRIPT" --inspect alpha)
+assert_contains "$noncanonical_flags_inspect" "pinned yes · protected yes"
+
+zero_flags_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox \
+  TMUX_META_PINNED=0 TMUX_META_PROTECTED=0 "$SCRIPT" --json alpha)
+printf '%s' "$zero_flags_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["pinned"] is False
+assert metadata["protected"] is False
+'
+
 vanished_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_LIST_PANES_FAIL_TARGET="$MOCK_ID_1" \
   TMUX_ROOM_DEVICE=devbox "$SCRIPT" --json)
 printf '%s' "$vanished_json" | /usr/bin/python3 -c '
