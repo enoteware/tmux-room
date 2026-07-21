@@ -1846,9 +1846,10 @@ lookup_host() {
   [[ -f "$TMUX_ROOM_HOSTS_FILE" ]] || return 1
   while read -r label target rest || [[ -n "$label" ]]; do
     [[ -z "$label" || "$label" == \#* ]] && continue
-    [[ -z "$rest" ]] || return 1
+    if [[ -n "$rest" ]] || ! valid_device_label "$label" || ! valid_host_field "$target"; then
+      continue
+    fi
     [[ "$label" == "$wanted" ]] || continue
-    valid_device_label "$label" && valid_host_field "$target" || return 1
     printf '%s' "$target"
     return 0
   done < "$TMUX_ROOM_HOSTS_FILE"

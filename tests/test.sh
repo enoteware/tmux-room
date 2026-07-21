@@ -1084,6 +1084,17 @@ assert_contains "$(<"$SSH_LOG")" "-o BatchMode=yes -o ConnectTimeout=6 -o Connec
 assert_contains "$(<"$SSH_LOG")" "tmux-room --inspect-id 9 remote-review"
 assert_not_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room --inspect-id"
 
+MIXED_LOOKUP_HOSTS="$MOCK/mixed-lookup-hosts"
+printf '%s\n' 'broken too many fields' 'mini mini-host' > "$MIXED_LOOKUP_HOSTS"
+: > "$SSH_LOG"
+mixed_lookup_picker=$(printf '/remote-review\n\nn\nq' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$MIXED_LOOKUP_HOSTS" "$SCRIPT" --fleet)
+assert_contains "$mixed_lookup_picker" "ROOM DETAILS"
+assert_contains "$mixed_lookup_picker" "Attachment cancelled"
+assert_not_contains "$mixed_lookup_picker" "Device is no longer configured"
+assert_contains "$(<"$SSH_LOG")" "tmux-room --inspect-id 9 remote-review"
+
 : > "$SSH_LOG"
 printf '/remote-review\n\ny\n' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
   TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
