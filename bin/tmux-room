@@ -11,6 +11,9 @@ TMUX_ROOM_FLEET_SCHEMA="tmux-room.fleet"
 TMUX_ROOM_FLEET_SCHEMA_VERSION=1
 TMUX_ROOM_REMOTE_MAX_BYTES="${TMUX_ROOM_REMOTE_MAX_BYTES:-4194304}"
 TMUX_ROOM_REMOTE_TIMEOUT_SECONDS="${TMUX_ROOM_REMOTE_TIMEOUT_SECONDS:-15}"
+# Keep HOME literal here so the destination shell expands and quotes its own home directory.
+# shellcheck disable=SC2016
+TMUX_ROOM_REMOTE_PATH_ASSIGNMENT='PATH="$HOME/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"'
 TMUX_ROOM_OPTION_DRIVER='@tmux_room_driver'
 TMUX_ROOM_OPTION_STATE='@tmux_room_state'
 TMUX_ROOM_OPTION_STATE_AT='@tmux_room_state_at'
@@ -1871,7 +1874,8 @@ print_all_devices() {
     fi
     [[ "$label" == "$(get_device_label)" ]] && continue
     echo
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" "TMUX_ROOM_DEVICE=$label TMUX_ROOM_SOURCE_LABEL=remote tmux-room --list"; then
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" \
+      /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" "TMUX_ROOM_DEVICE=$label" TMUX_ROOM_SOURCE_LABEL=remote tmux-room --list; then
       echo "DEVICE: $label [unreachable]"
     fi
   done < "$TMUX_ROOM_HOSTS_FILE"
@@ -2039,7 +2043,7 @@ print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
 
 collect_remote_inventory() {
   local label="$1" target="$2" output_file="$3" max_bytes="$4" timeout_seconds="$5"
-  python3 - "$output_file" "$max_bytes" "$timeout_seconds" "$target" "$label" <<'PY'
+  python3 - "$output_file" "$max_bytes" "$timeout_seconds" "$target" "$label" "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" <<'PY'
 import os
 import selectors
 import signal
@@ -2047,7 +2051,7 @@ import subprocess
 import sys
 import time
 
-output_file, max_bytes_raw, timeout_raw, target, label = sys.argv[1:]
+output_file, max_bytes_raw, timeout_raw, target, label, remote_path_assignment = sys.argv[1:]
 try:
     max_bytes = int(max_bytes_raw)
     timeout_seconds = int(timeout_raw)
@@ -2062,7 +2066,7 @@ argv = [
     "-o", "ServerAliveInterval=5",
     "-o", "ServerAliveCountMax=1",
     target,
-    "env", "TMUX_ROOM_DEVICE=" + label, "TMUX_ROOM_SOURCE_LABEL=remote",
+    "/usr/bin/env", remote_path_assignment, "TMUX_ROOM_DEVICE=" + label, "TMUX_ROOM_SOURCE_LABEL=remote",
     "tmux-room", "--json",
 ]
 
@@ -2396,7 +2400,7 @@ fleet_inspect_index() {
   digits="${session_id#\$}"
   ssh -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 \
     -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "$remote" \
-    tmux-room --inspect-id "$digits" "$room"
+    /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room --inspect-id "$digits" "$room"
 }
 
 fleet_attach_index() {
@@ -2422,7 +2426,7 @@ fleet_attach_index() {
   digits="${session_id#\$}"
   echo "Attaching to $room on $device. Detach with Ctrl-b then d."
   exec ssh -t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 "$remote" \
-    tmux-room --attach-id "$digits" "$room"
+    /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room --attach-id "$digits" "$room"
 }
 
 fleet_picker() {
@@ -2696,7 +2700,7 @@ if [[ ("${1:-}" == "--inspect" || "${1:-}" == "--json") && "${2:-}" == *:* ]]; t
   remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
   command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote inspection." >&2; exit 127; }
   exec ssh -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 "$remote" \
-    env "TMUX_ROOM_DEVICE=$device" TMUX_ROOM_SOURCE_LABEL=remote tmux-room "$1" "$target"
+    /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" "TMUX_ROOM_DEVICE=$device" TMUX_ROOM_SOURCE_LABEL=remote tmux-room "$1" "$target"
 fi
 
 # Remote kill runs the same double-confirmation flow on the destination host.
@@ -2709,7 +2713,7 @@ if [[ "${1:-}" == "--kill" && "${2:-}" == *:* ]]; then
   fi
   remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
   command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote termination." >&2; exit 127; }
-  exec ssh -t "$remote" tmux-room --kill "$target"
+  exec ssh -t "$remote" /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room --kill "$target"
 fi
 
 # Remote attachment needs SSH only; it does not require local tmux or Python.
@@ -2723,7 +2727,7 @@ if [[ "${1:-}" == *:* ]]; then
   remote=$(lookup_host "$device") || { echo "Device not found in $TMUX_ROOM_HOSTS_FILE: $device" >&2; exit 1; }
   command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote attachment." >&2; exit 127; }
   echo "Attaching to $target on $device. Detach with Ctrl-b then d."
-  exec ssh -t "$remote" tmux-room "$target"
+  exec ssh -t "$remote" /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room "$target"
 fi
 
 require_local_dependencies

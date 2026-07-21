@@ -354,6 +354,19 @@ EOF
 cat > "$MOCK/ssh" <<'EOF'
 #!/usr/bin/env bash
 [[ -n "${SSH_MOCK_LOG:-}" ]] && printf '%s\n' "$*" >> "$SSH_MOCK_LOG"
+if [[ -n "${SSH_MOCK_EXEC_REMOTE:-}" ]]; then
+  while (($# > 0)); do
+    case "$1" in
+      -o) shift 2 ;;
+      -t) shift ;;
+      --) shift; break ;;
+      -*) shift ;;
+      *) shift; break ;;
+    esac
+  done
+  HOME="$SSH_MOCK_REMOTE_HOME" /bin/sh -c "$*"
+  exit $?
+fi
 case "$*" in
   *'tmux-room --json alpha'*)
     printf '%s\n' '{"schema":"tmux-room.inventory","schema_version":1,"generated_at":1700004000,"device":{"name":"mini","source":"remote"},"rooms":[{"id":"$9","name":"alpha","windows":1,"attached":false,"created_at":1700000000,"activity_at":1700003600,"path":"/remote/project","metadata":{"driver":"codex","state":"running","state_updated_at":1700003500,"state_age_seconds":100,"fresh":true,"note":"remote room","pinned":false,"protected":false}}]}'
@@ -911,27 +924,46 @@ assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
 
 HOSTS="$MOCK/hosts"
 SSH_LOG="$MOCK/ssh.log"
+# This must match the literal value sent to the destination shell.
+# shellcheck disable=SC2016
+REMOTE_PATH_ASSIGNMENT='PATH="$HOME/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"'
 printf 'mini mini-host' > "$HOSTS"
 all_output=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --all)
 assert_contains "$all_output" "DEVICE: devbox [local]"
 assert_contains "$all_output" "DEVICE: mini [remote]"
 assert_contains "$all_output" "remote-review"
+assert_contains "$(<"$SSH_LOG")" "mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT TMUX_ROOM_DEVICE=mini TMUX_ROOM_SOURCE_LABEL=remote tmux-room --list"
 assert_contains "$(<"$SSH_LOG")" "TMUX_ROOM_SOURCE_LABEL=remote"
+
+REMOTE_HOME="$MOCK/remote home"
+mkdir -p "$REMOTE_HOME/bin"
+cat > "$REMOTE_HOME/bin/tmux-room" <<'EOF'
+#!/usr/bin/env sh
+printf 'REMOTE_PATH:%s\n' "$PATH"
+printf 'REMOTE_ARGS:%s\n' "$*"
+EOF
+chmod +x "$REMOTE_HOME/bin/tmux-room"
+: > "$SSH_LOG"
+remote_path_output=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" SSH_MOCK_EXEC_REMOTE=1 \
+  SSH_MOCK_REMOTE_HOME="$REMOTE_HOME" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --inspect mini:alpha)
+assert_contains "$remote_path_output" "REMOTE_PATH:$REMOTE_HOME/bin:$REMOTE_HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+assert_contains "$remote_path_output" "REMOTE_ARGS:--inspect alpha"
+assert_contains "$(<"$SSH_LOG")" "/usr/bin/env $REMOTE_PATH_ASSIGNMENT"
 
 : > "$SSH_LOG"
 remote_inspect_output=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --inspect mini:alpha)
 assert_contains "$remote_inspect_output" "ROOM DETAILS"
-assert_contains "$(<"$SSH_LOG")" "-o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host env TMUX_ROOM_DEVICE=mini TMUX_ROOM_SOURCE_LABEL=remote tmux-room --inspect alpha"
+assert_contains "$(<"$SSH_LOG")" "-o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT TMUX_ROOM_DEVICE=mini TMUX_ROOM_SOURCE_LABEL=remote tmux-room --inspect alpha"
 assert_not_contains "$(<"$SSH_LOG")" "ssh -t"
 
 : > "$SSH_LOG"
 remote_json_output=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --json mini:alpha)
 printf '%s' "$remote_json_output" | /usr/bin/python3 -c 'import json,sys; doc=json.load(sys.stdin); assert doc["schema_version"] == 1; assert doc["device"]["source"] == "remote"'
-assert_contains "$(<"$SSH_LOG")" "tmux-room --json alpha"
+assert_contains "$(<"$SSH_LOG")" "/usr/bin/env $REMOTE_PATH_ASSIGNMENT TMUX_ROOM_DEVICE=mini TMUX_ROOM_SOURCE_LABEL=remote tmux-room --json alpha"
 
 : > "$SSH_LOG"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" mini:alpha >/dev/null
-assert_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room alpha"
+assert_contains "$(<"$SSH_LOG")" "-t mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room alpha"
 
 : > "$SSH_LOG"
 unsafe_remote=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --inspect 'mini:--kill' 2>&1 || true)
@@ -1032,6 +1064,7 @@ assert_not_contains "$fleet_json" "large-host"
 assert_not_contains "$fleet_json" "error-host"
 assert_not_contains "$fleet_json" "must-not-leak"
 assert_not_contains "$fleet_json" "unsafe"
+assert_contains "$(<"$SSH_LOG")" "mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT TMUX_ROOM_DEVICE=mini TMUX_ROOM_SOURCE_LABEL=remote tmux-room --json"
 
 fleet_alias=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --all --json)
 printf '%s' "$fleet_alias" | /usr/bin/python3 -c 'import json,sys; document=json.load(sys.stdin); assert document["schema"] == "tmux-room.fleet"; assert len(document["devices"]) == 8'
@@ -1081,8 +1114,8 @@ assert_contains "$fleet_picker_output" "SEARCH: remote-review"
 assert_contains "$fleet_picker_output" "ROOM DETAILS"
 assert_contains "$fleet_picker_output" "Attachment cancelled"
 assert_contains "$(<"$SSH_LOG")" "-o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1"
-assert_contains "$(<"$SSH_LOG")" "tmux-room --inspect-id 9 remote-review"
-assert_not_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room --inspect-id"
+assert_contains "$(<"$SSH_LOG")" "mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --inspect-id 9 remote-review"
+assert_not_contains "$(<"$SSH_LOG")" "-t mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --inspect-id"
 
 MIXED_LOOKUP_HOSTS="$MOCK/mixed-lookup-hosts"
 printf '%s\n' 'broken too many fields' 'mini mini-host' > "$MIXED_LOOKUP_HOSTS"
@@ -1093,13 +1126,13 @@ mixed_lookup_picker=$(printf '/remote-review\n\nn\nq' | PATH="$MOCK:/usr/bin:/bi
 assert_contains "$mixed_lookup_picker" "ROOM DETAILS"
 assert_contains "$mixed_lookup_picker" "Attachment cancelled"
 assert_not_contains "$mixed_lookup_picker" "Device is no longer configured"
-assert_contains "$(<"$SSH_LOG")" "tmux-room --inspect-id 9 remote-review"
+assert_contains "$(<"$SSH_LOG")" "/usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --inspect-id 9 remote-review"
 
 : > "$SSH_LOG"
 printf '/remote-review\n\ny\n' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
   TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
   TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet >/dev/null
-assert_contains "$(<"$SSH_LOG")" "-t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host tmux-room --attach-id 9 remote-review"
+assert_contains "$(<"$SSH_LOG")" "-t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --attach-id 9 remote-review"
 
 : > "$TMUX_LOG"
 protected_kill_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_META_PROTECTED="${ESC}1${BIDI}" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)
@@ -1268,7 +1301,7 @@ assert_not_contains "$(<"$TMUX_LOG")" "atomic-kill"
 
 : > "$SSH_LOG"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --kill mini:alpha >/dev/null
-assert_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room --kill alpha"
+assert_contains "$(<"$SSH_LOG")" "-t mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --kill alpha"
 
 BAD_HOSTS="$MOCK/bad-hosts"
 printf 'bad -oProxyCommand\n' > "$BAD_HOSTS"
