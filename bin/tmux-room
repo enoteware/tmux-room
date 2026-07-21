@@ -1237,6 +1237,7 @@ PY
     activity="${room_activity[i]}"
     session_id="${room_ids[i]}"
     [[ -z "$wanted" || "$name" == "$wanted" ]] || continue
+    valid_metadata_text "$name" || continue
     if ! first_path=$(first_pane_path "$session_id"); then
       continue
     fi
@@ -2288,7 +2289,7 @@ print(json.dumps(document, ensure_ascii=True, separators=(",", ":")))
 }
 
 load_fleet_view() {
-  local fleet_file="$1" kind a b c d e f g h i j k l
+  local fleet_file="$1" kind a b c d e f g h i j k l fleet_record_sep=$'\037'
   view_raw_names=()
   view_names=()
   view_devices=()
@@ -2309,7 +2310,7 @@ load_fleet_view() {
   fleet_unavailable=0
   fleet_unavailable_names=()
   fleet_unavailable_statuses=()
-  while IFS=$'\t' read -r kind a b c d e f g h i j k l; do
+  while IFS="$fleet_record_sep" read -r kind a b c d e f g h i j k l; do
     case "$kind" in
       D)
         fleet_devices=$((fleet_devices + 1))
@@ -2353,7 +2354,7 @@ for device in document.get("devices", []):
     name = device["name"]
     source = device["source"]
     status = device["status"]
-    print("D", name, source, status, sep="\t")
+    print("D", name, source, status, sep="\x1f")
     if status != "reachable":
         continue
     for room in device["rooms"]:
@@ -2369,7 +2370,7 @@ for device in document.get("devices", []):
         print(
             "R", name, source, room["id"], room["name"], room["windows"],
             int(room["attached"]), room["activity_at"], room["path"],
-            metadata["driver"], state, metadata["note"], flags, sep="\t"
+            metadata["driver"], state, metadata["note"], flags, sep="\x1f"
         )
 PY
   )

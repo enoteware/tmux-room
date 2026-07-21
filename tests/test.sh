@@ -122,6 +122,9 @@ case "$1" in
       ;;
     esac
     case "$*" in *'$4:'*) display_name='a|b'; display_default_id='$4' ;; esac
+    if [[ "$display_default_id" == '$1' && -n "${TMUX_MOCK_ROOM_NAME:-}" ]]; then
+      display_name="$TMUX_MOCK_ROOM_NAME"
+    fi
     if [[ "$display_default_id" == '$1' && -n "${TMUX_MOCK_STATE_DIR:-}" && -f "$TMUX_MOCK_STATE_DIR/renamed" ]]; then
       read -r display_name < "$TMUX_MOCK_STATE_DIR/renamed"
     fi
@@ -954,6 +957,12 @@ invalid_local_label=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE='mini@bad' "$S
 printf '%s' "$invalid_local_label" | /usr/bin/python3 -c 'import json,sys; assert json.load(sys.stdin)["device"]["name"] == "local"'
 tainted_local_label=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=$'mini\n' "$SCRIPT" --json)
 printf '%s' "$tainted_local_label" | /usr/bin/python3 -c 'import json,sys; assert json.load(sys.stdin)["device"]["name"] == "local"'
+TAINTED_ROOM_HOSTS="$MOCK/tainted-room-hosts"
+: > "$TAINTED_ROOM_HOSTS"
+tainted_room_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_ROOM_NAME="unsafe${BIDI}room" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --json)
+printf '%s' "$tainted_room_json" | /usr/bin/python3 -c 'import json,sys; assert [room["name"] for room in json.load(sys.stdin)["rooms"]] == ["beta"]'
+tainted_room_fleet=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_ROOM_NAME="unsafe${BIDI}room" TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$TAINTED_ROOM_HOSTS" "$SCRIPT" --fleet-json)
+printf '%s' "$tainted_room_fleet" | /usr/bin/python3 -c 'import json,sys; device=json.load(sys.stdin)["devices"][0]; assert device["status"] == "reachable" and [room["name"] for room in device["rooms"]] == ["beta"]'
 
 FLEET_HOSTS="$MOCK/fleet-hosts"
 printf '%s\n' \
@@ -1036,6 +1045,14 @@ assert_not_contains "$fleet_output" "mini-host"
 assert_not_contains "$fleet_output" "must-not-leak"
 assert_before "$fleet_output" "mini:remote-review" "devbox:alpha"
 assert_max_display_width "$fleet_output" 72
+assert_not_contains "$fleet_output" "0|0|1"
+
+local_fleet_picker_output=$(printf '/alpha\n\nn\nq' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
+assert_contains "$local_fleet_picker_output" "ROOM DETAILS"
+assert_contains "$local_fleet_picker_output" "Attachment cancelled"
+assert_not_contains "$local_fleet_picker_output" "display-only"
 
 narrow_fleet_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=34 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
 for unavailable_device in down badjson tainted hugeint large error; do
