@@ -46,7 +46,7 @@ import re
 import sys
 
 query, present, absent = sys.argv[1:]
-screens = sys.stdin.read().split("\x1b[2J\x1b[H")
+screens = sys.stdin.read().split("\x1b[H")
 matches = [re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", screen) for screen in screens if "SEARCH: " + query in screen]
 if not matches:
     raise SystemExit("no filtered picker screen found")
@@ -61,7 +61,7 @@ import re
 import sys
 
 first, second = sys.argv[1:]
-screens = sys.stdin.read().split("\x1b[2J\x1b[H")
+screens = sys.stdin.read().split("\x1b[H")
 screen = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", screens[-1])
 if "SEARCH:" in screen or first not in screen or second not in screen:
     raise SystemExit("unexpected cleared picker screen: %r" % screen)
