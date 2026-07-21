@@ -70,7 +70,7 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 
 bash -n "$SCRIPT"
 bash -n "$ROOT/install.sh"
-[[ "$($SCRIPT --version)" == "tmux-room 0.4.0" ]] || fail "version should be 0.4.0"
+[[ "$($SCRIPT --version)" == "tmux-room 0.4.1" ]] || fail "version should be 0.4.1"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"
@@ -481,7 +481,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'TMUX_ROOM_VERSION="broken"' '(' > "$INVALID
 cp "$SCRIPT" "$UPDATE_DIR/invalid-copy"
 invalid_update_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" "$UPDATE_DIR/invalid-copy" --update 2>&1 || true)
 assert_contains "$invalid_update_output" "syntax error"
-[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.4.0" ]] || fail "invalid update replaced the installed copy"
+[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.4.1" ]] || fail "invalid update replaced the installed copy"
 
 invalid_install_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" 2>&1 || true)
@@ -493,11 +493,11 @@ MISSING_VERSION="$UPDATE_DIR/missing-version"
 printf '%s\n' '#!/usr/bin/env bash' 'echo missing' > "$MISSING_VERSION"
 cp "$SCRIPT" "$UPDATE_DIR/missing-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$MISSING_VERSION" "$UPDATE_DIR/missing-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.4.0" ]] || fail "versionless update replaced the installed copy"
+[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.4.1" ]] || fail "versionless update replaced the installed copy"
 
 cp "$SCRIPT" "$UPDATE_DIR/download-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 "$UPDATE_DIR/download-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.4.0" ]] || fail "failed download replaced the installed copy"
+[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.4.1" ]] || fail "failed download replaced the installed copy"
 
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" >/dev/null 2>&1 || true
@@ -819,8 +819,10 @@ assert_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_dr
 assert_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_state"
 assert_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_state_at"
 assert_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_note"
-assert_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_pinned"
-assert_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_protected"
+assert_contains "$clear_metadata_log" "set-option -t $MOCK_ID_1 @tmux_room_pinned 0"
+assert_contains "$clear_metadata_log" "set-option -t $MOCK_ID_1 @tmux_room_protected 0"
+assert_not_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_pinned"
+assert_not_contains "$clear_metadata_log" "set-option -u -t $MOCK_ID_1 @tmux_room_protected"
 
 : > "$TMUX_LOG"
 invalid_state_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --metadata alpha --state stale 2>&1 || true)
@@ -1443,8 +1445,16 @@ real_protected=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" T
   "$SCRIPT" --kill renamed-room 2>&1 || true)
 assert_contains "$real_protected" "Kill refused: room is protected"
 
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -g @tmux_room_pinned 1
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -g @tmux_room_protected 1
 PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
-  "$SCRIPT" --metadata renamed-room --unprotected >/dev/null
+  "$SCRIPT" --metadata renamed-room --unpinned --unprotected >/dev/null
+[[ "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -v -t renamed-room @tmux_room_pinned)" == "0" ]] || \
+  fail "real unpinned flag inherited the global default"
+[[ "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -v -t renamed-room @tmux_room_protected)" == "0" ]] || \
+  fail "real unprotected flag inherited the global default"
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -gu @tmux_room_pinned
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -gu @tmux_room_protected
 real_boundary=$(printf 'boundary-room\nKILL\n' | PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" \
   TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_REAL_PROTECT_ON_IF=1 TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
   "$SCRIPT" --kill boundary-room 2>&1 || true)
