@@ -225,7 +225,7 @@ The shared tmux options are:
 
 Metadata is advisory, not an authorization boundary. Any process or user with access to the tmux socket can change these options. Never put passwords, tokens, private prompts, or other secrets in a public room note.
 
-Pinned and protected values use fail-closed exact semantics. Only an unset option or the exact raw value `0` is false. Every other stored value is displayed and exported as enabled, and the corresponding cleanup or termination guard remains active. Use `--unpinned` or `--unprotected` to clear these flags safely.
+Pinned and protected values use fail-closed exact semantics. An unset option, an explicitly empty value, or the exact raw value `0` is false. Every other stored value is displayed and exported as enabled, and the corresponding cleanup or termination guard remains active. Use `--unpinned` or `--unprotected` to clear these flags safely.
 
 Update metadata without attaching:
 

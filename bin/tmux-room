@@ -177,11 +177,11 @@ metadata_load() {
     metadata_note="${clean:0:500}"
   fi
   load_exact_tmux_option "$session_id" "$TMUX_ROOM_OPTION_PINNED"
-  if [[ "$loaded_option_is_set" == "1" && "$loaded_option_value" != "0" ]]; then
+  if [[ "$loaded_option_is_set" == "1" && -n "$loaded_option_value" && "$loaded_option_value" != "0" ]]; then
     metadata_pinned=1
   fi
   load_exact_tmux_option "$session_id" "$TMUX_ROOM_OPTION_PROTECTED"
-  if [[ "$loaded_option_is_set" == "1" && "$loaded_option_value" != "0" ]]; then
+  if [[ "$loaded_option_is_set" == "1" && -n "$loaded_option_value" && "$loaded_option_value" != "0" ]]; then
     metadata_protected=1
   fi
 }

@@ -581,6 +581,18 @@ assert metadata["pinned"] is False
 assert metadata["protected"] is False
 '
 
+empty_flags_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox \
+  TMUX_META_PINNED='' TMUX_META_PROTECTED='' "$SCRIPT" --json alpha)
+printf '%s' "$empty_flags_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["pinned"] is False
+assert metadata["protected"] is False
+'
+empty_flags_inspect=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox \
+  TMUX_META_PINNED='' TMUX_META_PROTECTED='' "$SCRIPT" --inspect alpha)
+assert_contains "$empty_flags_inspect" "pinned no · protected no"
+
 vanished_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_LIST_PANES_FAIL_TARGET="$MOCK_ID_1" \
   TMUX_ROOM_DEVICE=devbox "$SCRIPT" --json)
 printf '%s' "$vanished_json" | /usr/bin/python3 -c '
@@ -1285,6 +1297,17 @@ printf '%s' "$real_pipe_json" | /usr/bin/python3 -c 'import json,sys; room=json.
 real_pipe_inspect=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
   "$SCRIPT" --inspect 'a|b')
 assert_contains "$real_pipe_inspect" "ROOM: a|b"
+
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -t live-room @tmux_room_pinned ''
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -t live-room @tmux_room_protected ''
+real_empty_flags_json=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
+  "$SCRIPT" --json live-room)
+printf '%s' "$real_empty_flags_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["pinned"] is False
+assert metadata["protected"] is False
+'
 
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -t live-room @tmux_room_driver claude
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -t live-room @tmux_room_state idle
