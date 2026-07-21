@@ -195,9 +195,13 @@ case "$1" in
     fi
     ;;
   list-panes)
+    if [[ -n "${TMUX_LIST_PANES_FAIL_TARGET:-}" && "$*" == *"-t $TMUX_LIST_PANES_FAIL_TARGET -F #{pane_current_path}"* ]]; then
+      exit 1
+    fi
+    pane_path="${TMUX_MOCK_PANE_PATH:-/work/knowledge-hub}"
     case "$*" in
-      *'#{pane_pid}|#{pane_current_path}'*) echo '4242|/work/knowledge-hub|node|review' ;;
-      *'#{pane_current_path}'*) echo '/work/knowledge-hub' ;;
+      *'#{pane_pid}|#{pane_current_path}'*) printf '4242|%s|node|review\n' "$pane_path" ;;
+      *'#{pane_current_path}'*) printf '%s\n' "$pane_path" ;;
       *'#{pane_pid}'*) echo '4242' ;;
     esac
     ;;
@@ -517,6 +521,15 @@ assert_contains "$attention_output" "!failed"
 assert_before "$attention_output" "alpha" "beta"
 assert_before "$attention_output" "beta" "a|b"
 
+vanished_picker_output=$(printf 'q' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 \
+  TMUX_LIST_PANES_FAIL_TARGET="$MOCK_ID_1" TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_contains "$vanished_picker_output" "beta"
+assert_not_contains "$vanished_picker_output" "alpha"
+vanished_list_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_LIST_PANES_FAIL_TARGET="$MOCK_ID_1" \
+  TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
+assert_contains "$vanished_list_output" "beta"
+assert_not_contains "$vanished_list_output" "alpha"
+
 NOW=$(date +%s)
 ESC=$(printf '\033')
 BIDI=$(printf '\342\200\256')
@@ -546,6 +559,23 @@ assert room["metadata"]["protected"] is True
 ' "$MOCK_ID_1"
 assert_not_contains "$json_output" "$ESC"
 assert_not_contains "$json_output" "$BIDI"
+
+vanished_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_LIST_PANES_FAIL_TARGET="$MOCK_ID_1" \
+  TMUX_ROOM_DEVICE=devbox "$SCRIPT" --json)
+printf '%s' "$vanished_json" | /usr/bin/python3 -c '
+import json, sys
+rooms = json.load(sys.stdin)["rooms"]
+assert [room["name"] for room in rooms] == ["beta"]
+'
+
+TAB=$(printf '\t')
+tainted_path_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_PANE_PATH="/work/control${TAB}path" \
+  TMUX_ROOM_DEVICE=devbox "$SCRIPT" --json alpha)
+printf '%s' "$tainted_path_json" | /usr/bin/python3 -c '
+import json, sys
+assert json.load(sys.stdin)["rooms"][0]["path"] == "/work/controlpath"
+'
+assert_not_contains "$tainted_path_json" "$TAB"
 
 unknown_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --json alpha)
 printf '%s' "$unknown_json" | /usr/bin/python3 -c '

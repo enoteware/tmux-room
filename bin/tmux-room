@@ -558,6 +558,12 @@ find_room_row() {
   return 1
 }
 
+first_pane_path() {
+  local session_id="$1" pane_paths
+  pane_paths=$(tmux list-panes -s -t "$session_id" -F '#{pane_current_path}' 2>/dev/null) || return 1
+  printf '%s\n' "$pane_paths" | sed -n '1p'
+}
+
 session_details() {
   local name="$1" windows="$2" attached="$3" created="$4" activity="$5" session_id="$6" index="$7"
   local status display_name pid path command title roots hints first_path repo_names branches top branch
@@ -792,7 +798,10 @@ prepare_local_view() {
     attached="${room_attached[i]}"
     session_id="${room_ids[i]}"
     metadata_load "$session_id"
-    path=$(tmux list-panes -s -t "$session_id" -F '#{pane_current_path}' 2>/dev/null | sed -n '1p')
+    if ! path=$(first_pane_path "$session_id"); then
+      continue
+    fi
+    path=$(sanitize_text "$path")
     driver="$metadata_driver"
     if [[ "$driver" == "unknown" || -z "$driver" ]]; then
       driver=$(compact_agent_label "$session_id")
@@ -812,7 +821,7 @@ prepare_local_view() {
     view_windows+=("${room_windows[i]}")
     view_attached+=("$attached")
     view_activity+=("${room_activity[i]}")
-    view_paths+=("$(sanitize_text "$path")")
+    view_paths+=("$path")
     view_drivers+=("$(sanitize_text "$driver")")
     view_states+=("$(sanitize_text "$state")")
     view_notes+=("$(sanitize_text "$metadata_note")")
@@ -1134,8 +1143,11 @@ PY
     activity="${room_activity[i]}"
     session_id="${room_ids[i]}"
     [[ -z "$wanted" || "$name" == "$wanted" ]] || continue
+    if ! first_path=$(first_pane_path "$session_id"); then
+      continue
+    fi
+    first_path=$(sanitize_text "$first_path")
     metadata_load "$session_id"
-    first_path=$(tmux list-panes -s -t "$session_id" -F '#{pane_current_path}' 2>/dev/null | sed -n '1p')
     ((first == 1)) || printf ','
     first=0
     TMUX_ROOM_JSON_ID="$session_id" \
