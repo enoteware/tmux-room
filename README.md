@@ -225,7 +225,7 @@ The shared tmux options are:
 
 Metadata is advisory, not an authorization boundary. Any process or user with access to the tmux socket can change these options. Never put passwords, tokens, private prompts, or other secrets in a public room note.
 
-Pinned and protected values use fail-closed exact semantics. An unset option, an explicitly empty value, or the exact raw value `0` is false. Every other stored value is displayed and exported as enabled, and the corresponding cleanup or termination guard remains active. Use `--unpinned` or `--unprotected` to clear these flags safely.
+Pinned and protected values use fail-closed exact semantics. An unset option, an explicitly empty value, or the exact raw value `0` is false. Every other stored value is displayed and exported as enabled, and the corresponding cleanup or termination guard remains active. `--unpinned` and `--unprotected` write an explicit per-room `0`, so global tmux defaults cannot keep either flag enabled.
 
 Update metadata without attaching:
 
@@ -238,7 +238,7 @@ tmux-room --metadata kh-review \
   --protected
 ```
 
-Clear values with `--clear-driver`, `--clear-state`, `--clear-note`, `--unpinned`, and `--unprotected`. Each update snapshots exactly the requested options, targets the immutable session ID, and revalidates the room identity throughout the transaction. If a write fails, tmux-room restores the snapshot. `--state` writes the current epoch to `@tmux_room_state_at` before committing the new state; `--clear-state` clears both options.
+Unset driver, state, and note values with `--clear-driver`, `--clear-state`, and `--clear-note`. Disable the per-room flags with `--unpinned` and `--unprotected`; these explicit false overrides take precedence over enabled global defaults. Each update snapshots exactly the requested options, targets the immutable session ID, and revalidates the room identity throughout the transaction. If a write fails, tmux-room restores the snapshot. `--state` writes the current epoch to `@tmux_room_state_at` before committing the new state; `--clear-state` clears both options.
 
 Writable states are `running`, `idle`, `needs_input`, `failed`, `completed`, and `ended`. `unknown` is the honest unset or invalid fallback. `stale` is derived and cannot be written through the CLI.
 

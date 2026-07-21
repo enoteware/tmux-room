@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.4.0"
+TMUX_ROOM_VERSION="0.4.1"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
@@ -1412,7 +1412,9 @@ parse_metadata_args() {
   metadata_note_mode="keep"
   metadata_note_value=""
   metadata_pinned_mode="keep"
+  metadata_pinned_value=""
   metadata_protected_mode="keep"
+  metadata_protected_value=""
 
   while (($# > 0)); do
     case "$1" in
@@ -1464,21 +1466,25 @@ parse_metadata_args() {
         ;;
       --pinned)
         metadata_pinned_mode="set"
+        metadata_pinned_value="1"
         metadata_arg_count=$((metadata_arg_count + 1))
         shift
         ;;
       --unpinned)
-        metadata_pinned_mode="unset"
+        metadata_pinned_mode="set"
+        metadata_pinned_value="0"
         metadata_arg_count=$((metadata_arg_count + 1))
         shift
         ;;
       --protected)
         metadata_protected_mode="set"
+        metadata_protected_value="1"
         metadata_arg_count=$((metadata_arg_count + 1))
         shift
         ;;
       --unprotected)
-        metadata_protected_mode="unset"
+        metadata_protected_mode="set"
+        metadata_protected_value="0"
         metadata_arg_count=$((metadata_arg_count + 1))
         shift
         ;;
@@ -1536,12 +1542,12 @@ apply_parsed_metadata() {
   if [[ "$metadata_pinned_mode" != "keep" ]]; then
     transaction_modes+=("$metadata_pinned_mode")
     transaction_options+=("$TMUX_ROOM_OPTION_PINNED")
-    transaction_values+=("1")
+    transaction_values+=("$metadata_pinned_value")
   fi
   if [[ "$metadata_protected_mode" != "keep" ]]; then
     transaction_modes+=("$metadata_protected_mode")
     transaction_options+=("$TMUX_ROOM_OPTION_PROTECTED")
-    transaction_values+=("1")
+    transaction_values+=("$metadata_protected_value")
   fi
 
   for i in "${!transaction_options[@]}"; do
