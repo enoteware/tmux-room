@@ -2450,9 +2450,10 @@ fleet_picker() {
     else
       status="All configured devices are reachable."
     fi
-    printf '\033[2J\033[H'
+    printf '\033[H'
     render_view_table fleet "$selected" "FLEET: $summary" "STATUS: $status" \
       "/ search | c clear | arrows move | Enter inspect/attach | q quit" "$query"
+    printf '\033[J'
     IFS= read -rsn1 key || return 1
     if [[ "$key" == $'\033' ]]; then
       rest=""
@@ -2590,7 +2591,7 @@ arrow_picker() {
     fi
 
     while true; do
-      printf '\033[2J\033[H'
+      printf '\033[H'
       status_line=$(sanitize_text "$(server_status)")
       [[ -z "${update_notice:-}" ]] || status_line="$status_line | $(sanitize_text "$update_notice")"
       render_view_table local "$selected" \
@@ -2598,6 +2599,7 @@ arrow_picker() {
         "STATUS: $status_line" \
         "/ search | c clear | arrows move | Enter inspect/attach | x close | q quit" \
         "$query"
+      printf '\033[J'
 
       IFS= read -rsn1 key || return 1
       if [[ "$key" == $'\033' ]]; then
