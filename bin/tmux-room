@@ -10,6 +10,7 @@ TMUX_ROOM_SCHEMA_VERSION=1
 TMUX_ROOM_FLEET_SCHEMA="tmux-room.fleet"
 TMUX_ROOM_FLEET_SCHEMA_VERSION=1
 TMUX_ROOM_REMOTE_MAX_BYTES="${TMUX_ROOM_REMOTE_MAX_BYTES:-4194304}"
+TMUX_ROOM_REMOTE_TIMEOUT_SECONDS="${TMUX_ROOM_REMOTE_TIMEOUT_SECONDS:-15}"
 TMUX_ROOM_OPTION_DRIVER='@tmux_room_driver'
 TMUX_ROOM_OPTION_STATE='@tmux_room_state'
 TMUX_ROOM_OPTION_STATE_AT='@tmux_room_state_at'
@@ -81,11 +82,11 @@ sanitize_text() {
 }
 
 valid_portable_room_name() {
-  [[ -n "$1" && "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+  [[ -n "$1" && "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
 }
 
 valid_local_room_name() {
-  [[ -n "$1" ]] && valid_metadata_text "$1"
+  [[ -n "$1" && "$1" != -* ]] && valid_metadata_text "$1"
 }
 
 valid_metadata_token() {
@@ -204,13 +205,21 @@ guard_value_is_false() {
 
 tmux_atomic_kill() {
   local session_id="$1" mode="$2" expected_activity="${3:-}" condition output rc
+  local protected_false pinned_false
+  protected_false='#{||:#{==:#{@tmux_room_protected},},#{==:#{@tmux_room_protected},0}}'
+  pinned_false='#{||:#{==:#{@tmux_room_pinned},},#{==:#{@tmux_room_pinned},0}}'
   case "$mode" in
     direct)
-      condition="#{&&:#{==:#{session_id},$session_id},#{!:#{@tmux_room_protected}}}"
+      condition="#{==:#{session_id},$session_id}"
+      condition="#{&&:$condition,$protected_false}"
       ;;
     cleanup)
       [[ "$expected_activity" =~ ^[0-9]+$ ]] || return 1
-      condition="#{&&:#{==:#{session_id},$session_id},#{==:#{session_attached},0},#{!:#{@tmux_room_pinned}},#{!:#{@tmux_room_protected}},#{==:#{session_activity},$expected_activity}}"
+      condition="#{==:#{session_id},$session_id}"
+      condition="#{&&:$condition,#{==:#{session_attached},0}}"
+      condition="#{&&:$condition,$pinned_false}"
+      condition="#{&&:$condition,$protected_false}"
+      condition="#{&&:$condition,#{==:#{session_activity},$expected_activity}}"
       ;;
     *) return 1 ;;
   esac
@@ -774,7 +783,7 @@ prepare_local_view() {
   view_protected=()
   view_action_safe=()
 
-  device=$(sanitize_text "$(get_device_name)")
+  device=$(get_device_label)
   load_rows
   ((${#rows[@]} > 0)) || return 0
   load_compact_agent_inventory
@@ -861,6 +870,11 @@ render_view_table() {
   local width i index target selected_flag
   width=$(terminal_columns)
   {
+    if [[ "$mode" == "fleet" ]]; then
+      for i in "${!fleet_unavailable_names[@]}"; do
+        printf 'S\t%s\t%s\n' "${fleet_unavailable_names[i]}" "${fleet_unavailable_statuses[i]}"
+      done
+    fi
     for i in "${!view_order[@]}"; do
       index="${view_order[i]}"
       if [[ "$mode" == "fleet" ]]; then
@@ -870,7 +884,7 @@ render_view_table() {
       fi
       selected_flag=0
       [[ "$i" == "$selected" ]] && selected_flag=1
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf 'R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$((i + 1))" "$selected_flag" \
         "${view_pinned[index]}" "$target" "${view_drivers[index]}" "${view_states[index]}" \
         "${view_windows[index]}" "${view_activity[index]}" "${view_notes[index]}"
@@ -938,11 +952,15 @@ if header or subheader or controls or query:
     line()
 
 rows = []
+statuses = []
 for raw in sys.stdin:
     fields = raw.rstrip("\n").split("\t")
-    if len(fields) != 9:
+    if len(fields) == 3 and fields[0] == "S":
+        statuses.append((clean(fields[1]), clean(fields[2])))
         continue
-    number, selected, pinned, target, driver, state, windows, activity, note = fields
+    if len(fields) != 10 or fields[0] != "R":
+        continue
+    _, number, selected, pinned, target, driver, state, windows, activity, note = fields
     try:
         stamp = int(activity)
     except ValueError:
@@ -957,6 +975,11 @@ for raw in sys.stdin:
     except (OverflowError, OSError, ValueError):
         active = "unknown"
     rows.append((number, selected == "1", pin, clean(target), clean(driver), clean(state), clean(windows), active, clean(note)))
+
+if statuses:
+    for device, status in statuses:
+        line("! " + device + ": " + status)
+    line()
 
 if width < 64:
     line("#  ROOM  ATTENTION")
@@ -1012,7 +1035,7 @@ if not rows:
 
 print_local_rooms() {
   local source_label="${1:-local}" device status_line
-  device=$(sanitize_text "$(get_device_name)")
+  device=$(get_device_label)
   source_label=$(sanitize_text "$source_label")
   status_line=$(sanitize_text "$(server_status)")
   if ! tmux has-session 2>/dev/null; then
@@ -1084,7 +1107,7 @@ print_json_inventory() {
   TMUX_ROOM_JSON_SCHEMA="$TMUX_ROOM_SCHEMA" \
   TMUX_ROOM_JSON_SCHEMA_VERSION="$TMUX_ROOM_SCHEMA_VERSION" \
   TMUX_ROOM_JSON_GENERATED_AT="$(date +%s)" \
-  TMUX_ROOM_JSON_DEVICE="$(get_device_name)" \
+  TMUX_ROOM_JSON_DEVICE="$(get_device_label)" \
   TMUX_ROOM_JSON_SOURCE="$source_label" python3 - <<'PY'
 import json
 import os
@@ -1372,23 +1395,97 @@ apply_metadata_option() {
 }
 
 apply_parsed_metadata() {
-  local session_id="$1" room="$2" state_at_mode="keep" state_at_value=""
-  apply_metadata_option "$session_id" "$room" "$metadata_driver_mode" "$TMUX_ROOM_OPTION_DRIVER" "$metadata_driver_value" || return $?
-  apply_metadata_option "$session_id" "$room" "$metadata_state_mode" "$TMUX_ROOM_OPTION_STATE" "$metadata_state_value" || return $?
+  local session_id="$1" room="$2" state_at_value="" i old_value snapshot_output failure rollback_ok
+  local -a transaction_modes transaction_options transaction_values snapshot_was_set snapshot_values
+  transaction_modes=()
+  transaction_options=()
+  transaction_values=()
+  snapshot_was_set=()
+  snapshot_values=()
+
+  if [[ "$metadata_driver_mode" != "keep" ]]; then
+    transaction_modes+=("$metadata_driver_mode")
+    transaction_options+=("$TMUX_ROOM_OPTION_DRIVER")
+    transaction_values+=("$metadata_driver_value")
+  fi
   if [[ "$metadata_state_mode" == "set" ]]; then
-    state_at_mode="set"
     state_at_value=$(date +%s)
+    transaction_modes+=("set" "set")
+    transaction_options+=("$TMUX_ROOM_OPTION_STATE_AT" "$TMUX_ROOM_OPTION_STATE")
+    transaction_values+=("$state_at_value" "$metadata_state_value")
   elif [[ "$metadata_state_mode" == "unset" ]]; then
-    state_at_mode="unset"
+    transaction_modes+=("unset" "unset")
+    transaction_options+=("$TMUX_ROOM_OPTION_STATE" "$TMUX_ROOM_OPTION_STATE_AT")
+    transaction_values+=("" "")
   fi
-  apply_metadata_option "$session_id" "$room" "$state_at_mode" "$TMUX_ROOM_OPTION_STATE_AT" "$state_at_value" || return $?
-  apply_metadata_option "$session_id" "$room" "$metadata_note_mode" "$TMUX_ROOM_OPTION_NOTE" "$metadata_note_value" || return $?
-  apply_metadata_option "$session_id" "$room" "$metadata_pinned_mode" "$TMUX_ROOM_OPTION_PINNED" "1" || return $?
-  apply_metadata_option "$session_id" "$room" "$metadata_protected_mode" "$TMUX_ROOM_OPTION_PROTECTED" "1" || return $?
-  if ! revalidate_session "$session_id" "$room"; then
-    echo "Metadata update could not be verified because the room identity changed." >&2
-    return 1
+  if [[ "$metadata_note_mode" != "keep" ]]; then
+    transaction_modes+=("$metadata_note_mode")
+    transaction_options+=("$TMUX_ROOM_OPTION_NOTE")
+    transaction_values+=("$metadata_note_value")
   fi
+  if [[ "$metadata_pinned_mode" != "keep" ]]; then
+    transaction_modes+=("$metadata_pinned_mode")
+    transaction_options+=("$TMUX_ROOM_OPTION_PINNED")
+    transaction_values+=("1")
+  fi
+  if [[ "$metadata_protected_mode" != "keep" ]]; then
+    transaction_modes+=("$metadata_protected_mode")
+    transaction_options+=("$TMUX_ROOM_OPTION_PROTECTED")
+    transaction_values+=("1")
+  fi
+
+  for i in "${!transaction_options[@]}"; do
+    if ! revalidate_session "$session_id" "$room"; then
+      echo "Metadata update aborted before mutation: room identity changed." >&2
+      return 1
+    fi
+    snapshot_output=""
+    if snapshot_output=$(tmux show-options -v -t "$session_id" "${transaction_options[i]}" 2>/dev/null && printf '\034'); then
+      snapshot_output="${snapshot_output%$'\034'}"
+      old_value="${snapshot_output%$'\n'}"
+      snapshot_was_set+=("1")
+      snapshot_values+=("$old_value")
+    else
+      if ! revalidate_session "$session_id" "$room"; then
+        echo "Metadata update aborted before mutation: room identity changed." >&2
+        return 1
+      fi
+      snapshot_was_set+=("0")
+      snapshot_values+=("")
+    fi
+  done
+
+  failure=0
+  for i in "${!transaction_options[@]}"; do
+    if ! apply_metadata_option "$session_id" "$room" "${transaction_modes[i]}" \
+      "${transaction_options[i]}" "${transaction_values[i]}"; then
+      failure=1
+      break
+    fi
+  done
+  if ((failure == 0)) && ! revalidate_session "$session_id" "$room"; then
+    failure=1
+  fi
+  ((failure == 1)) || return 0
+
+  rollback_ok=1
+  for ((i = ${#transaction_options[@]} - 1; i >= 0; i--)); do
+    if ! revalidate_session "$session_id" "$room"; then
+      rollback_ok=0
+      break
+    fi
+    if [[ "${snapshot_was_set[i]}" == "1" ]]; then
+      tmux set-option -t "$session_id" "${transaction_options[i]}" "${snapshot_values[i]}" || rollback_ok=0
+    else
+      tmux set-option -u -t "$session_id" "${transaction_options[i]}" || rollback_ok=0
+    fi
+  done
+  if ((rollback_ok == 1)); then
+    echo "Metadata update failed; restored the previous metadata snapshot." >&2
+  else
+    echo "Metadata update failed and rollback could not be completed." >&2
+  fi
+  return 1
 }
 
 new_local_room() {
@@ -1401,7 +1498,10 @@ new_local_room() {
     case "$1" in
       --cwd)
         (($# >= 2)) || { echo "--cwd requires an existing directory." >&2; return 2; }
-        valid_metadata_text "$2" && [[ -d "$2" ]] || { echo "Directory not found or unsafe: $(sanitize_text "$2")" >&2; return 2; }
+        if ! valid_metadata_text "$2" || [[ ! -d "$2" ]]; then
+          echo "Directory not found or unsafe: $(sanitize_text "$2")" >&2
+          return 2
+        fi
         cwd=$(cd -- "$2" 2>/dev/null && pwd -P) || { echo "Cannot access directory: $(sanitize_text "$2")" >&2; return 2; }
         shift 2
         ;;
@@ -1445,8 +1545,11 @@ new_local_room() {
     return 1
   fi
   if ! revalidate_session "$session_id" "$room"; then
-    echo "Room creation succeeded, but setup failed because its immutable ID could not be verified: $room" >&2
-    echo "The unverified room was not removed." >&2
+    if tmux kill-session -t "$session_id" 2>/dev/null; then
+      echo "Room creation rolled back because tmux did not preserve the requested identity: $room" >&2
+    else
+      echo "Room creation succeeded, but its identity could not be verified or rolled back: $room" >&2
+    fi
     return 1
   fi
   if ! apply_parsed_metadata "$session_id" "$room"; then
@@ -1638,7 +1741,7 @@ lookup_host() {
     [[ -z "$label" || "$label" == \#* ]] && continue
     [[ -z "$rest" ]] || return 1
     [[ "$label" == "$wanted" ]] || continue
-    valid_host_field "$label" && valid_host_field "$target" || return 1
+    valid_device_label "$label" && valid_host_field "$target" || return 1
     printf '%s' "$target"
     return 0
   done < "$TMUX_ROOM_HOSTS_FILE"
@@ -1653,12 +1756,12 @@ print_all_devices() {
   while read -r label target rest || [[ -n "$label" ]]; do
     [[ -z "$label" || "$label" == \#* ]] && continue
     safe_label=$(sanitize_text "$label")
-    if [[ -n "$rest" ]] || ! valid_host_field "$label" || ! valid_host_field "$target"; then
+    if [[ -n "$rest" ]] || ! valid_device_label "$label" || ! valid_host_field "$target"; then
       echo
       echo "DEVICE: $safe_label [invalid host entry]"
       continue
     fi
-    [[ "$label" == "$(get_device_name)" ]] && continue
+    [[ "$label" == "$(get_device_label)" ]] && continue
     echo
     if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" "TMUX_ROOM_DEVICE=$label TMUX_ROOM_SOURCE_LABEL=remote tmux-room --list"; then
       echo "DEVICE: $label [unreachable]"
@@ -1667,7 +1770,22 @@ print_all_devices() {
 }
 
 valid_device_label() {
-  [[ -n "$1" && "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+  [[ -n "$1" && ${#1} -le 128 && "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+get_device_label() {
+  local raw label
+  if [[ -n "${TMUX_ROOM_DEVICE:-}" ]]; then
+    raw="$TMUX_ROOM_DEVICE"
+  else
+    raw=$(get_device_name)
+  fi
+  label=$(sanitize_text "$raw")
+  if [[ "$raw" == "$label" ]] && valid_device_label "$raw"; then
+    printf '%s' "$raw"
+  else
+    printf 'local'
+  fi
 }
 
 fleet_status_record() {
@@ -1811,9 +1929,134 @@ print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
 '
 }
 
+collect_remote_inventory() {
+  local label="$1" target="$2" output_file="$3" max_bytes="$4" timeout_seconds="$5"
+  python3 - "$output_file" "$max_bytes" "$timeout_seconds" "$target" "$label" <<'PY'
+import os
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+output_file, max_bytes_raw, timeout_raw, target, label = sys.argv[1:]
+try:
+    max_bytes = int(max_bytes_raw)
+    timeout_seconds = int(timeout_raw)
+except ValueError:
+    raise SystemExit(24)
+
+argv = [
+    "ssh",
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=6",
+    "-o", "ConnectionAttempts=1",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=1",
+    target,
+    "env", "TMUX_ROOM_DEVICE=" + label, "TMUX_ROOM_SOURCE_LABEL=remote",
+    "tmux-room", "--json",
+]
+
+try:
+    destination = open(output_file, "wb")
+except OSError:
+    raise SystemExit(24)
+
+try:
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        start_new_session=True,
+    )
+except OSError:
+    destination.close()
+    raise SystemExit(23)
+
+def stop_process():
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=0.5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
+
+deadline = time.monotonic() + timeout_seconds
+selector = None
+total = 0
+result = None
+try:
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            result = 20
+            break
+        events = selector.select(remaining)
+        if not events:
+            result = 20
+            break
+        chunk = os.read(process.stdout.fileno(), min(65536, max_bytes + 1 - total))
+        if not chunk:
+            break
+        destination.write(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            result = 21
+            break
+except KeyboardInterrupt:
+    stop_process()
+    raise SystemExit(130)
+except Exception:
+    result = 24
+finally:
+    if selector is not None:
+        selector.close()
+    process.stdout.close()
+    destination.close()
+
+if result is not None:
+    stop_process()
+    raise SystemExit(result)
+
+remaining = deadline - time.monotonic()
+if remaining <= 0:
+    stop_process()
+    raise SystemExit(20)
+try:
+    return_code = process.wait(timeout=remaining)
+except subprocess.TimeoutExpired:
+    stop_process()
+    raise SystemExit(20)
+
+if return_code == 0:
+    raise SystemExit(0)
+if return_code == 255:
+    raise SystemExit(22)
+raise SystemExit(23)
+PY
+}
+
 print_fleet_json() {
-  local local_label raw record label target rest safe_label rc complete line_number max_bytes bytes ssh_rc head_rc
-  local -a fleet_records seen_labels pipeline_status
+  local local_label raw record label target rest safe_label rc complete line_number max_bytes timeout_seconds
+  local -a fleet_records seen_labels
   fleet_records=()
   seen_labels=()
   complete=true
@@ -1827,14 +2070,20 @@ print_fleet_json() {
       max_bytes=4194304
     fi
   fi
+  timeout_seconds="$TMUX_ROOM_REMOTE_TIMEOUT_SECONDS"
+  if [[ ! "$timeout_seconds" =~ ^[0-9]+$ || ${#timeout_seconds} -gt 3 ]]; then
+    timeout_seconds=15
+  else
+    timeout_seconds=$((10#$timeout_seconds))
+    if ((timeout_seconds < 1 || timeout_seconds > 300)); then
+      timeout_seconds=15
+    fi
+  fi
   remote_inventory_tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-room-remote.XXXXXX")
   trap cleanup_fleet_temp_files EXIT
   trap 'cleanup_fleet_temp_files; exit 130' HUP INT TERM
 
-  local_label=$(sanitize_text "$(get_device_name)")
-  if ! valid_device_label "$local_label"; then
-    local_label="local"
-  fi
+  local_label=$(get_device_label)
   raw=$(print_json_inventory)
   if record=$(printf '%s' "$raw" | normalize_inventory_record "$local_label" local 2>/dev/null); then
     fleet_records+=("$record")
@@ -1870,35 +2119,26 @@ print_fleet_json() {
         continue
       fi
       : > "$remote_inventory_tmp"
-      ssh_rc=0
-      head_rc=0
-      if ssh -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 \
-        -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "$target" \
-        env "TMUX_ROOM_DEVICE=$label" TMUX_ROOM_SOURCE_LABEL=remote tmux-room --json 2>/dev/null \
-        | head -c "$((max_bytes + 1))" > "$remote_inventory_tmp"; then
-        :
-      else
-        pipeline_status=("${PIPESTATUS[@]}")
-        ssh_rc="${pipeline_status[0]:-1}"
-        head_rc="${pipeline_status[1]:-1}"
-      fi
-      bytes=$(wc -c < "$remote_inventory_tmp")
-      bytes="${bytes//[[:space:]]/}"
-      [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=$((max_bytes + 1))
-      if ((bytes > max_bytes)); then
+      rc=0
+      collect_remote_inventory "$label" "$target" "$remote_inventory_tmp" "$max_bytes" "$timeout_seconds" || rc=$?
+      if ((rc == 20)); then
+        fleet_records+=("$(fleet_status_record "$label" remote unreachable collection_timeout)")
+        complete=false
+        continue
+      elif ((rc == 21)); then
         fleet_records+=("$(fleet_status_record "$label" remote invalid inventory_too_large)")
         complete=false
         continue
-      elif ((head_rc != 0)); then
-        fleet_records+=("$(fleet_status_record "$label" remote invalid inventory_read_failed)")
-        complete=false
-        continue
-      elif ((ssh_rc == 255)); then
+      elif ((rc == 22)); then
         fleet_records+=("$(fleet_status_record "$label" remote unreachable connection_failed)")
         complete=false
         continue
-      elif ((ssh_rc != 0)); then
+      elif ((rc == 23)); then
         fleet_records+=("$(fleet_status_record "$label" remote unsupported remote_command_failed)")
+        complete=false
+        continue
+      elif ((rc != 0)); then
+        fleet_records+=("$(fleet_status_record "$label" remote invalid inventory_read_failed)")
         complete=false
         continue
       fi
@@ -1961,7 +2201,8 @@ load_fleet_view() {
   fleet_devices=0
   fleet_reachable=0
   fleet_unavailable=0
-  fleet_status_text=""
+  fleet_unavailable_names=()
+  fleet_unavailable_statuses=()
   while IFS=$'\t' read -r kind a b c d e f g h i j k l; do
     case "$kind" in
       D)
@@ -1970,7 +2211,8 @@ load_fleet_view() {
           fleet_reachable=$((fleet_reachable + 1))
         else
           fleet_unavailable=$((fleet_unavailable + 1))
-          fleet_status_text="${fleet_status_text:+$fleet_status_text, }$a=$c"
+          fleet_unavailable_names+=("$a")
+          fleet_unavailable_statuses+=("$c")
         fi
         ;;
       R)
@@ -2013,7 +2255,10 @@ for device in document.get("devices", []):
         state = metadata["state"]
         if state == "unknown":
             state = "attached" if room["attached"] else "detached"
-        safe = source == "local" or bool(re.fullmatch(r"[A-Za-z0-9._-]+", room["name"]))
+        if source == "local":
+            safe = not room["name"].startswith("-")
+        else:
+            safe = bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", room["name"]))
         flags = "{}|{}|{}".format(int(metadata["pinned"]), int(metadata["protected"]), int(safe))
         print(
             "R", name, source, room["id"], room["name"], room["windows"],
@@ -2035,10 +2280,10 @@ fleet_inspect_index() {
     inspect_local_room "$room" "$session_id"
     return $?
   fi
-  valid_device_label "$device" && valid_portable_room_name "$room" && [[ "$session_id" =~ ^\$[0-9]+$ ]] || {
+  if ! valid_device_label "$device" || ! valid_portable_room_name "$room" || [[ ! "$session_id" =~ ^\$[0-9]+$ ]]; then
     echo "Invalid remote room identity." >&2
     return 2
-  }
+  fi
   remote=$(lookup_host "$device") || { echo "Device is no longer configured: $device" >&2; return 1; }
   digits="${session_id#\$}"
   ssh -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 \
@@ -2061,10 +2306,10 @@ fleet_attach_index() {
     echo "Attaching to $room. Detach with Ctrl-b then d."
     exec tmux attach-session -t "$session_id"
   fi
-  valid_device_label "$device" && valid_portable_room_name "$room" && [[ "$session_id" =~ ^\$[0-9]+$ ]] || {
+  if ! valid_device_label "$device" || ! valid_portable_room_name "$room" || [[ ! "$session_id" =~ ^\$[0-9]+$ ]]; then
     echo "Invalid remote room identity." >&2
     return 2
-  }
+  fi
   remote=$(lookup_host "$device") || { echo "Device is no longer configured: $device" >&2; return 1; }
   digits="${session_id#\$}"
   echo "Attaching to $room on $device. Detach with Ctrl-b then d."
@@ -2082,19 +2327,27 @@ fleet_picker() {
       selected=$((${#view_order[@]} - 1))
     fi
     summary="$fleet_devices devices, $fleet_reachable reachable, $fleet_unavailable unavailable"
-    status="${fleet_status_text:-All configured devices are reachable.}"
+    if ((fleet_unavailable > 0)); then
+      status="$fleet_unavailable configured devices need attention."
+    else
+      status="All configured devices are reachable."
+    fi
     printf '\033[2J\033[H'
     render_view_table fleet "$selected" "FLEET: $summary" "STATUS: $status" \
       "/ search | c clear | arrows move | Enter inspect/attach | q quit" "$query"
     IFS= read -rsn1 key || return 1
     if [[ "$key" == $'\033' ]]; then
       rest=""
-      IFS= read -rsn2 rest || true
-      case "$rest" in
-        '[A') if ((selected > 0)); then selected=$((selected - 1)); fi ;;
-        '[B') if ((selected + 1 < ${#view_order[@]})); then selected=$((selected + 1)); fi ;;
-      esac
-      continue
+      IFS= read -rsn1 -t 1 rest || continue
+      if [[ "$rest" == "[" ]]; then
+        IFS= read -rsn1 -t 1 rest || continue
+        case "$rest" in
+          A) if ((selected > 0)); then selected=$((selected - 1)); fi ;;
+          B) if ((selected + 1 < ${#view_order[@]})); then selected=$((selected + 1)); fi ;;
+        esac
+        continue
+      fi
+      key="$rest"
     fi
     case "$key" in
       q|Q) return 0 ;;
@@ -2154,32 +2407,54 @@ run_fleet() {
   fi
   build_visible_order ""
   summary="$fleet_devices devices, $fleet_reachable reachable, $fleet_unavailable unavailable"
-  status="${fleet_status_text:-All configured devices are reachable.}"
+  if ((fleet_unavailable > 0)); then
+    status="$fleet_unavailable configured devices need attention."
+  else
+    status="All configured devices are reachable."
+  fi
   render_view_table fleet -1 "FLEET: $summary" "STATUS: $status" "" ""
 }
 
 self_update() {
-  local self tmp downloader
+  local self self_dir self_name self_mode downloader
   self="${BASH_SOURCE[0]}"
+  if [[ -L "$self" ]]; then
+    echo "Cannot update $self: symbolic-link installations are not replaced automatically." >&2
+    exit 1
+  fi
   if [[ ! -w "$self" ]]; then
     echo "Cannot update $self: file is not writable." >&2
     exit 1
   fi
-  tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-room.XXXXXX")
-  trap 'rm -f "$tmp"' EXIT
+  self_dir=$(cd -- "$(dirname "$self")" 2>/dev/null && pwd -P) || {
+    echo "Cannot update $self: installation directory is unavailable." >&2
+    exit 1
+  }
+  self_name="${self##*/}"
+  if self_mode=$(stat -f '%Lp' "$self" 2>/dev/null); then
+    :
+  elif self_mode=$(stat -c '%a' "$self" 2>/dev/null); then
+    :
+  else
+    self_mode=755
+  fi
+  [[ "$self_mode" =~ ^[0-7]{3,4}$ ]] || self_mode=755
+  update_tmp=$(mktemp "$self_dir/.${self_name}.update.XXXXXX")
+  trap '[[ -z "${update_tmp:-}" ]] || rm -f "$update_tmp"' EXIT
   if command -v curl >/dev/null 2>&1; then
-    downloader=(curl -fsSL "$TMUX_ROOM_RAW_URL" -o "$tmp")
+    downloader=(curl -fsSL "$TMUX_ROOM_RAW_URL" -o "$update_tmp")
   elif command -v wget >/dev/null 2>&1; then
-    downloader=(wget -qO "$tmp" "$TMUX_ROOM_RAW_URL")
+    downloader=(wget -qO "$update_tmp" "$TMUX_ROOM_RAW_URL")
   else
     echo "tmux-room update requires curl or wget." >&2
     exit 1
   fi
   "${downloader[@]}"
-  bash -n "$tmp"
-  grep -q '^TMUX_ROOM_VERSION=' "$tmp"
-  chmod 755 "$tmp"
-  mv "$tmp" "$self"
+  bash -n "$update_tmp"
+  grep -q '^TMUX_ROOM_VERSION=' "$update_tmp"
+  chmod "$self_mode" "$update_tmp"
+  mv -f "$update_tmp" "$self"
+  update_tmp=""
   trap - EXIT
   echo "Updated tmux-room: $($self --version)"
 }
@@ -2201,7 +2476,7 @@ arrow_picker() {
       status_line=$(sanitize_text "$(server_status)")
       [[ -z "${update_notice:-}" ]] || status_line="$status_line | $(sanitize_text "$update_notice")"
       render_view_table local "$selected" \
-        "DEVICE: $(sanitize_text "$(get_device_name)") [local]" \
+        "DEVICE: $(get_device_label) [local]" \
         "STATUS: $status_line" \
         "/ search | c clear | arrows move | Enter inspect/attach | x close | q quit" \
         "$query"
@@ -2209,12 +2484,16 @@ arrow_picker() {
       IFS= read -rsn1 key || return 1
       if [[ "$key" == $'\033' ]]; then
         rest=""
-        IFS= read -rsn2 rest || true
-        case "$rest" in
-          '[A') if ((selected > 0)); then selected=$((selected - 1)); fi ;;
-          '[B') if ((selected + 1 < ${#view_order[@]})); then selected=$((selected + 1)); fi ;;
-        esac
-        continue
+        IFS= read -rsn1 -t 1 rest || continue
+        if [[ "$rest" == "[" ]]; then
+          IFS= read -rsn1 -t 1 rest || continue
+          case "$rest" in
+            A) if ((selected > 0)); then selected=$((selected - 1)); fi ;;
+            B) if ((selected + 1 < ${#view_order[@]})); then selected=$((selected + 1)); fi ;;
+          esac
+          continue
+        fi
+        key="$rest"
       fi
       case "$key" in
         q|Q) return 1 ;;
@@ -2302,7 +2581,7 @@ fi
 if [[ ("${1:-}" == "--inspect" || "${1:-}" == "--json") && "${2:-}" == *:* ]]; then
   device=${2%%:*}
   target=${2#*:}
-  if ! valid_host_field "$device" || ! valid_portable_room_name "$target"; then
+  if ! valid_device_label "$device" || ! valid_portable_room_name "$target"; then
     echo "Invalid device or room name." >&2
     exit 2
   fi
@@ -2316,7 +2595,7 @@ fi
 if [[ "${1:-}" == "--kill" && "${2:-}" == *:* ]]; then
   device=${2%%:*}
   target=${2#*:}
-  if ! valid_host_field "$device" || ! valid_portable_room_name "$target"; then
+  if ! valid_device_label "$device" || ! valid_portable_room_name "$target"; then
     echo "Invalid device or room name." >&2
     exit 2
   fi
@@ -2329,7 +2608,7 @@ fi
 if [[ "${1:-}" == *:* ]]; then
   device=${1%%:*}
   target=${1#*:}
-  if ! valid_host_field "$device" || ! valid_portable_room_name "$target"; then
+  if ! valid_device_label "$device" || ! valid_portable_room_name "$target"; then
     echo "Invalid device or room name." >&2
     exit 2
   fi

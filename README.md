@@ -97,7 +97,7 @@ devbox hostinger-vps
 macbook my-macbook
 ```
 
-Only use SSH targets you already trust. Host labels and targets are restricted to safe hostname characters.
+Only use SSH targets you already trust. Device labels must start with a letter or number and may then contain letters, numbers, dots, underscores, or hyphens. SSH targets are validated separately and may include a user and host. Use an SSH config alias when a host needs a non-default port or other connection options.
 
 Optionally set a friendly name for the current device:
 
@@ -118,7 +118,7 @@ tmux-room --all
 tmux-room --fleet
 ```
 
-In an interactive terminal, `/` searches device, room, driver, state, note, and path. `Enter` inspects the selected immutable room identity, then asks before attaching. Without an interactive terminal, the same command prints a compact table. Unreachable, unsupported, and invalid devices stay visible in the fleet status instead of disappearing.
+In an interactive terminal, `/` searches device, room, driver, state, note, and path. `Enter` inspects the selected immutable room identity, then asks before attaching. Without an interactive terminal, the same command prints a compact table. Every unreachable, unsupported, or invalid device gets its own status row, including on narrow terminals.
 
 Attach through the registry:
 
@@ -208,7 +208,7 @@ The JSON inventory reads tmux session fields, the first pane working directory, 
 
 Consumers must check `schema_version`, then handle `reachable`, `unreachable`, `unsupported`, and `invalid` device statuses. `complete` is false if any configured device could not provide a valid inventory. Reachable devices contain the same whitelisted room objects as `tmux-room.inventory`.
 
-Remote inventory uses SSH batch mode, a connection timeout, and no pseudo-terminal. Each response must be valid version 1 inventory JSON within the configured size limit. Invalid JSON, unsupported schemas, duplicate identities, invalid types, control characters, and oversized responses become explicit device errors. Remote SSH targets, stderr, pane contents, and process environments are never copied into fleet JSON.
+Remote inventory uses SSH batch mode, no pseudo-terminal, and a hard wall-clock deadline for every device. The default deadline is 15 seconds and can be changed with `TMUX_ROOM_REMOTE_TIMEOUT_SECONDS` from 1 to 300 seconds. Each response must be valid version 1 inventory JSON within the configured size limit. Set `TMUX_ROOM_REMOTE_MAX_BYTES` from 1024 to 16777216 bytes to change the default 4 MiB limit. Timeouts, connection failures, remote command failures, invalid JSON, unsupported schemas, duplicate identities, invalid types, control characters, and oversized responses become distinct device errors. Remote SSH targets, stderr, pane contents, and process environments are never copied into fleet JSON.
 
 ## Public room metadata
 
@@ -236,7 +236,7 @@ tmux-room --metadata kh-review \
   --protected
 ```
 
-Clear values with `--clear-driver`, `--clear-state`, `--clear-note`, `--unpinned`, and `--unprotected`. Each write targets the immutable session ID and revalidates the room identity. `--state` automatically writes the current epoch to `@tmux_room_state_at`; `--clear-state` clears both options.
+Clear values with `--clear-driver`, `--clear-state`, `--clear-note`, `--unpinned`, and `--unprotected`. Each update snapshots exactly the requested options, targets the immutable session ID, and revalidates the room identity throughout the transaction. If a write fails, tmux-room restores the snapshot. `--state` writes the current epoch to `@tmux_room_state_at` before committing the new state; `--clear-state` clears both options.
 
 Writable states are `running`, `idle`, `needs_input`, `failed`, `completed`, and `ended`. `unknown` is the honest unset or invalid fallback. `stale` is derived and cannot be written through the CLI.
 
@@ -257,6 +257,8 @@ tmux-room --new kh-review --cwd /code/knowledge-hub --agent codex --state runnin
 ```
 
 Allowed agent names are `claude`, `codex`, `grok`, `gemini`, `cursor`, and `hermes`. The command must exist on `PATH`. Arbitrary shell command text is not accepted. When `--agent` is omitted, tmux starts the user's normal shell. When `--driver` is omitted, an explicit `--agent` also becomes the public driver value.
+
+New and renamed rooms must start with a letter or number, followed only by letters, numbers, underscores, or hyphens. Periods are excluded because current tmux releases can rewrite them in session names. This keeps room references unambiguous across tmux-room, SSH, macOS, and web clients.
 
 Creation captures the immutable ID directly from `tmux new-session`. Rename and metadata changes target that ID and verify it before and after mutation:
 

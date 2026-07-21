@@ -8,13 +8,14 @@ URL="https://raw.githubusercontent.com/$REPO/$REF/bin/tmux-room"
 TARGET="$INSTALL_DIR/tmux-room"
 
 mkdir -p "$INSTALL_DIR"
-tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-room.XXXXXX")
+tmp=$(mktemp "$INSTALL_DIR/.tmux-room.install.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 curl -fsSL "$URL" -o "$tmp"
 bash -n "$tmp"
 grep -q '^TMUX_ROOM_VERSION=' "$tmp"
 chmod 755 "$tmp"
-mv "$tmp" "$TARGET"
+mv -f "$tmp" "$TARGET"
+tmp=""
 trap - EXIT
 
 echo "Installed $($TARGET --version) at $TARGET"
