@@ -207,9 +207,9 @@ case "$1" in
     fi
     pane_path="${TMUX_MOCK_PANE_PATH:-/work/knowledge-hub}"
     case "$*" in
-      *'#{pane_pid}|#{pane_current_path}'*) printf '4242|%s|node|review\n' "$pane_path" ;;
+      *'#{pane_pid}|#{pane_current_path}'*) printf '2147483647|%s|node|review\n' "$pane_path" ;;
       *'#{pane_current_path}'*) printf '%s\n' "$pane_path" ;;
-      *'#{pane_pid}'*) echo '4242' ;;
+      *'#{pane_pid}'*) echo '2147483647' ;;
     esac
     ;;
   show-options)
