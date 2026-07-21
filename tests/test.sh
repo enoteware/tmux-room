@@ -754,6 +754,7 @@ assert_contains "$later_failure_log" "set-option -t $MOCK_ID_1 @tmux_room_protec
 
 TMUX_STATE="$MOCK/tmux-state"
 mkdir -p "$TMUX_STATE" "$MOCK/workspace"
+WORKSPACE_REAL=$(cd "$MOCK/workspace" && pwd -P)
 : > "$TMUX_LOG"
 rename_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --rename alpha gamma)
 assert_contains "$rename_output" "Renamed room: alpha to gamma (\$1)"
@@ -766,7 +767,7 @@ rm -f "$TMUX_STATE/renamed"
 new_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox \
   "$SCRIPT" --new gamma --cwd "$MOCK/workspace" --agent codex --state running --note "new workspace" --pinned)
 assert_contains "$new_output" "Created room: gamma (\$3)"
-assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s gamma -c $MOCK/workspace codex"
+assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s gamma -c $WORKSPACE_REAL codex"
 assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_driver codex"
 assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_state running"
 assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_state_at"
