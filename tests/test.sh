@@ -11,11 +11,58 @@ assert_contains() {
 assert_not_contains() {
   case "$1" in *"$2"*) fail "expected output not to contain unsafe value";; *) ;; esac
 }
+assert_before() {
+  case "$1" in *"$2"*"$3"*) ;; *) fail "expected $2 to appear before $3";; esac
+}
+assert_max_display_width() {
+  printf '%s' "$1" | /usr/bin/python3 -c '
+import re
+import sys
+import unicodedata
+
+limit = int(sys.argv[1])
+ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+for number, raw in enumerate(sys.stdin.read().splitlines(), 1):
+    line = ansi.sub("", raw)
+    width = sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in line)
+    if width > limit:
+        raise SystemExit("line %d is %d columns, expected at most %d: %r" % (number, width, limit, line))
+' "$2" || fail "output exceeded $2 columns"
+}
+assert_filtered_screen() {
+  printf '%s' "$1" | /usr/bin/python3 -c '
+import re
+import sys
+
+query, present, absent = sys.argv[1:]
+screens = sys.stdin.read().split("\x1b[2J\x1b[H")
+matches = [re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", screen) for screen in screens if "SEARCH: " + query in screen]
+if not matches:
+    raise SystemExit("no filtered picker screen found")
+screen = matches[-1]
+if present not in screen or absent in screen:
+    raise SystemExit("unexpected filtered screen: %r" % screen)
+' "$2" "$3" "$4" || fail "filtered picker screen was unsafe or incorrect"
+}
+assert_cleared_screen() {
+  printf '%s' "$1" | /usr/bin/python3 -c '
+import re
+import sys
+
+first, second = sys.argv[1:]
+screens = sys.stdin.read().split("\x1b[2J\x1b[H")
+screen = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", screens[-1])
+if "SEARCH:" in screen or first not in screen or second not in screen:
+    raise SystemExit("unexpected cleared picker screen: %r" % screen)
+' "$2" "$3" || fail "picker search did not clear safely"
+}
 
 bash -n "$SCRIPT"
 [[ "$($SCRIPT --version)" == "tmux-room 0.3.0" ]] || fail "version should be 0.3.0"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
+assert_contains "$help" "--fleet"
+assert_contains "$help" "--fleet-json"
 assert_contains "$help" "device:room"
 assert_contains "$help" "--kill"
 assert_contains "$help" "--json"
@@ -66,7 +113,43 @@ case "$1" in
     if [[ "$display_default_id" == '$1' && -n "${TMUX_MOCK_STATE_DIR:-}" && -f "$TMUX_MOCK_STATE_DIR/renamed" ]]; then
       read -r display_name < "$TMUX_MOCK_STATE_DIR/renamed"
     fi
-    if [[ "$*" == *'#{session_id}|#{session_name}|#{session_attached}|#{session_activity}'* ]]; then
+    if [[ "$*" == *'#{session_id}|#{session_attached}|#{session_activity}|#{@tmux_room_pinned}|#{@tmux_room_protected}'* ]]; then
+      [[ "${TMUX_GUARD_READ_FAIL:-0}" == "1" ]] && exit 1
+      display_attached=0
+      [[ "$display_default_id" == '$1' ]] && display_attached=1
+      display_activity="${TMUX_DISPLAY_ACTIVITY:-1700003600}"
+      if [[ -n "${TMUX_SNAPSHOT_COUNTER:-}" ]]; then
+        snapshot_count=0
+        [[ -f "$TMUX_SNAPSHOT_COUNTER" ]] && read -r snapshot_count < "$TMUX_SNAPSHOT_COUNTER"
+        snapshot_count=$((snapshot_count + 1))
+        printf '%s\n' "$snapshot_count" > "$TMUX_SNAPSHOT_COUNTER"
+        if ((snapshot_count >= ${TMUX_FINAL_AFTER:-3})) && [[ -n "${TMUX_FINAL_ATTACHED:-}" ]]; then
+          display_attached="$TMUX_FINAL_ATTACHED"
+        fi
+        if ((snapshot_count >= ${TMUX_FINAL_AFTER:-3})) && [[ -n "${TMUX_FINAL_ACTIVITY:-}" ]]; then
+          display_activity="$TMUX_FINAL_ACTIVITY"
+        fi
+      fi
+      display_pinned="${TMUX_META_PINNED:-}"
+      display_protected="${TMUX_META_PROTECTED:-}"
+      if [[ -n "${TMUX_PROTECTED_COUNTER:-}" ]]; then
+        protected_count=0
+        [[ -f "$TMUX_PROTECTED_COUNTER" ]] && read -r protected_count < "$TMUX_PROTECTED_COUNTER"
+        protected_count=$((protected_count + 1))
+        printf '%s\n' "$protected_count" > "$TMUX_PROTECTED_COUNTER"
+        if ((protected_count >= ${TMUX_PROTECTED_AFTER:-999999})); then
+          display_protected=1
+        fi
+      fi
+      printf '%s|%s|%s|%s|%s\n' "$display_default_id" "$display_attached" "$display_activity" "$display_pinned" "$display_protected"
+    elif [[ "$*" == *'#{session_id}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}'* ]]; then
+      display_id="${TMUX_LOAD_ID:-$display_default_id}"
+      display_windows=1
+      display_attached=0
+      [[ "$display_default_id" == '$1' ]] && display_windows=2
+      [[ "$display_default_id" == '$1' ]] && display_attached=1
+      printf '%s|%s|%s|%s|%s\n' "$display_id" "$display_windows" "$display_attached" 1700000000 1700003600
+    elif [[ "$*" == *'#{session_id}|#{session_name}|#{session_attached}|#{session_activity}'* ]]; then
       display_id="${TMUX_REVALIDATE_ID:-$display_default_id}"
       display_attached=0
       display_activity="${TMUX_DISPLAY_ACTIVITY:-1700003600}"
@@ -114,6 +197,18 @@ case "$1" in
     esac
     ;;
   show-options)
+    if [[ "${TMUX_ATTENTION_FIXTURE:-}" == "1" ]]; then
+      case "$*" in
+        *'$1 @tmux_room_driver') printf 'codex\n'; exit 0 ;;
+        *'$2 @tmux_room_driver') printf 'claude\n'; exit 0 ;;
+        *'$1 @tmux_room_state_at'|*'$2 @tmux_room_state_at') date +%s; exit 0 ;;
+        *'$1 @tmux_room_state') printf 'failed\n'; exit 0 ;;
+        *'$2 @tmux_room_state') printf 'needs_input\n'; exit 0 ;;
+        *'$1 @tmux_room_note') printf 'build failed\n'; exit 0 ;;
+        *'$2 @tmux_room_note') printf 'review requested\n'; exit 0 ;;
+        *'$4 @tmux_room_pinned') printf '1\n'; exit 0 ;;
+      esac
+    fi
     case "$*" in
       *'@tmux_room_driver') [[ -n "${TMUX_META_DRIVER+x}" ]] || exit 1; printf '%s\n' "$TMUX_META_DRIVER" ;;
       *'@tmux_room_state_at') [[ -n "${TMUX_META_STATE_AT+x}" ]] || exit 1; printf '%s\n' "$TMUX_META_STATE_AT" ;;
@@ -136,6 +231,22 @@ case "$1" in
         ;;
       *) exit 1 ;;
     esac
+    ;;
+  if-shell)
+    [[ "${TMUX_ATOMIC_FAIL:-0}" == "1" ]] && exit 1
+    if [[ "${TMUX_ATOMIC_BLOCK:-0}" == "1" ]]; then
+      printf 'TMUX_ROOM_BLOCKED\n'
+      exit 0
+    fi
+    if [[ -n "${TMUX_MOCK_LOG:-}" ]]; then
+      case "$*" in
+        *'$1:'*) printf 'atomic-kill $1\n' >> "$TMUX_MOCK_LOG" ;;
+        *'$2:'*) printf 'atomic-kill $2\n' >> "$TMUX_MOCK_LOG" ;;
+        *'$3:'*) printf 'atomic-kill $3\n' >> "$TMUX_MOCK_LOG" ;;
+        *'$4:'*) printf 'atomic-kill $4\n' >> "$TMUX_MOCK_LOG" ;;
+      esac
+    fi
+    exit 0
     ;;
   new-session)
     while (($# > 0)); do
@@ -208,12 +319,46 @@ cat > "$MOCK/ssh" <<'EOF'
 [[ -n "${SSH_MOCK_LOG:-}" ]] && printf '%s\n' "$*" >> "$SSH_MOCK_LOG"
 case "$*" in
   *'tmux-room --json alpha'*)
-    printf '%s\n' '{"schema":"tmux-room.inventory","schema_version":1,"device":{"name":"mini","source":"remote"},"rooms":[{"id":"$9","name":"alpha"}]}'
+    printf '%s\n' '{"schema":"tmux-room.inventory","schema_version":1,"generated_at":1700004000,"device":{"name":"mini","source":"remote"},"rooms":[{"id":"$9","name":"alpha","windows":1,"attached":false,"created_at":1700000000,"activity_at":1700003600,"path":"/remote/project","metadata":{"driver":"codex","state":"running","state_updated_at":1700003500,"state_age_seconds":100,"fresh":true,"note":"remote room","pinned":false,"protected":false}}]}'
     exit 0
     ;;
   *'tmux-room --inspect alpha'*)
     echo 'ROOM DETAILS'
     echo '  ROOM: alpha [detached]'
+    exit 0
+    ;;
+  *'tmux-room --inspect-id 9 remote-review'*)
+    echo 'ROOM DETAILS'
+    echo '  ROOM: remote-review [detached]'
+    exit 0
+    ;;
+  *'tmux-room --attach-id 9 remote-review'*)
+    exit 0
+    ;;
+  *'tmux-room --json'*)
+    case "$*" in
+      *'down-host'*)
+        echo 'TOKEN=must-not-leak' >&2
+        exit 255
+        ;;
+      *'badjson-host'*)
+        printf '%s\n' '{"schema":"legacy.inventory","schema_version":99,"rooms":[]}'
+        exit 0
+        ;;
+      *'tainted-host'*)
+        printf '%s\n' '{"schema":"tmux-room.inventory","schema_version":1,"generated_at":1700004000,"device":{"name":"tainted","source":"remote"},"rooms":[{"id":"$12","name":"unsafe\u202eroom","windows":1,"attached":false,"created_at":1700000000,"activity_at":1700003600,"path":"/remote/project","metadata":{"driver":"codex","state":"idle","state_updated_at":1700003500,"state_age_seconds":100,"fresh":true,"note":"unsafe","pinned":false,"protected":false}}]}'
+        exit 0
+        ;;
+      *'hugeint-host'*)
+        printf '%s\n' '{"schema":"tmux-room.inventory","schema_version":1,"generated_at":1700004000,"device":{"name":"hugeint","source":"remote"},"rooms":[{"id":"$13","name":"huge-clock","windows":1,"attached":false,"created_at":1700000000,"activity_at":9007199254740992,"path":"/remote/project","metadata":{"driver":"codex","state":"idle","state_updated_at":null,"state_age_seconds":null,"fresh":false,"note":"","pinned":false,"protected":false}}]}'
+        exit 0
+        ;;
+      *'large-host'*)
+        /usr/bin/python3 -c 'import sys; sys.stdout.write("x" * 2048)'
+        exit 0
+        ;;
+    esac
+    printf '%s\n' '{"schema":"tmux-room.inventory","schema_version":1,"generated_at":1700004000,"device":{"name":"forged-device-name","source":"local"},"rooms":[{"id":"$9","name":"remote-review","windows":1,"attached":false,"created_at":1700000000,"activity_at":1700003900,"path":"/remote/project","metadata":{"driver":"codex","state":"needs_input","state_updated_at":1700003890,"state_age_seconds":10,"fresh":true,"note":"review requested","pinned":false,"protected":false}}]}'
     exit 0
     ;;
 esac
@@ -244,8 +389,8 @@ printf 'q\n' | PATH="$MOCK:/usr/bin:/bin" CURL_MOCK_LOG="$CURL_LOG" TMUX_MOCK_LO
 output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
 assert_contains "$output" "DEVICE: devbox [local]"
 assert_contains "$output" "STATUS: CPU 12% load (0.96/8) · RAM 44% (13.9/31.3 GB)"
-assert_contains "$output" "#  ROOM"
-assert_contains "$output" "PROVIDER/MODEL"
+assert_contains "$output" "#  P ROOM"
+assert_contains "$output" "ATTENTION"
 assert_contains "$output" "claude-fable5-low"
 assert_contains "$output" "alpha"
 assert_contains "$output" "attached"
@@ -253,6 +398,27 @@ assert_contains "$output" "2023-11-14 23:13"
 assert_not_contains "$output" "AGENTS:"
 assert_not_contains "$output" "REPO:"
 assert_not_contains "$output" "SUMMED RSS SNAPSHOT:"
+
+narrow_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=50 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
+assert_contains "$narrow_output" "#  ROOM  ATTENTION"
+assert_contains "$narrow_output" "alpha"
+assert_max_display_width "$narrow_output" 50
+
+medium_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=80 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
+assert_contains "$medium_output" "ATTENTION"
+assert_contains "$medium_output" "DRIVER"
+assert_max_display_width "$medium_output" 80
+
+wide_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=120 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
+assert_contains "$wide_output" "LAST ACTIVE"
+assert_contains "$wide_output" "NOTE"
+assert_max_display_width "$wide_output" 120
+
+attention_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=120 TMUX_TWO_ROOMS=1 TMUX_PIPE_ROOM=1 TMUX_ATTENTION_FIXTURE=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
+assert_contains "$attention_output" "!needs_input"
+assert_contains "$attention_output" "!failed"
+assert_before "$attention_output" "alpha" "beta"
+assert_before "$attention_output" "beta" "a|b"
 
 NOW=$(date +%s)
 ESC=$(printf '\033')
@@ -311,10 +477,80 @@ assert metadata["state"] == "completed"
 assert metadata["fresh"] is False
 '
 
+raw_stale_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_META_STATE=stale TMUX_META_STATE_AT="$NOW" "$SCRIPT" --json alpha)
+printf '%s' "$raw_stale_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["state"] == "unknown"
+assert metadata["fresh"] is False
+'
+
+zero_timestamp_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_META_STATE=running TMUX_META_STATE_AT=0 "$SCRIPT" --json alpha)
+printf '%s' "$zero_timestamp_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["state_updated_at"] is None
+assert metadata["state_age_seconds"] is None
+assert metadata["fresh"] is False
+'
+
+leading_timestamp_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_META_STATE=completed TMUX_META_STATE_AT="0$NOW" "$SCRIPT" --json alpha)
+printf '%s' "$leading_timestamp_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["state_updated_at"] == int(sys.argv[1])
+assert metadata["state_age_seconds"] >= 0
+' "$NOW"
+
+oversized_timestamp_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_META_STATE=completed TMUX_META_STATE_AT=9007199254740992 "$SCRIPT" --json alpha)
+printf '%s' "$oversized_timestamp_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["state_updated_at"] is None
+assert metadata["state_age_seconds"] is None
+'
+
+FUTURE=$((NOW + 60))
+future_timestamp_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_META_STATE=completed TMUX_META_STATE_AT="$FUTURE" "$SCRIPT" --json alpha)
+printf '%s' "$future_timestamp_json" | /usr/bin/python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
+assert metadata["state_updated_at"] == int(sys.argv[1])
+assert metadata["state_age_seconds"] is None
+assert metadata["fresh"] is False
+' "$FUTURE"
+
 inspect_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_META_DRIVER=codex TMUX_META_STATE=idle TMUX_META_STATE_AT="$NOW" TMUX_META_NOTE="review ready" "$SCRIPT" --inspect alpha)
 assert_contains "$inspect_output" "ROOM DETAILS"
 assert_contains "$inspect_output" "METADATA: driver codex · state idle · pinned no · protected no"
 assert_contains "$inspect_output" "NOTE: review ready"
+
+: > "$TMUX_LOG"
+inspect_id_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --inspect-id 1 alpha)
+assert_contains "$inspect_id_output" "ROOM DETAILS"
+assert_contains "$(<"$TMUX_LOG")" "display-message -p -t $MOCK_ID_1: #{session_id}|#{session_name}"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --attach-id 1 alpha >/dev/null
+assert_contains "$(<"$TMUX_LOG")" "attach-session -t $MOCK_ID_1"
+
+: > "$TMUX_LOG"
+inspect_id_race=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --inspect-id 2 alpha 2>&1 || true)
+assert_contains "$inspect_id_race" "Inspection aborted: room identity changed"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+attach_id_race=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --attach-id 1 beta 2>&1 || true)
+assert_contains "$attach_id_race" "Attachment aborted: room identity changed"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+
+: > "$TMUX_LOG"
+invalid_identity=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --inspect-id '1;whoami' alpha 2>&1 || true)
+assert_contains "$invalid_identity" "Invalid room identity"
+invalid_identity=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --attach-id 1 'bad:name' 2>&1 || true)
+assert_contains "$invalid_identity" "Invalid room identity"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
 
 pipe_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_PIPE_ROOM=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --json 'a|b')
 printf '%s' "$pipe_json" | /usr/bin/python3 -c 'import json,sys; rooms=json.load(sys.stdin)["rooms"]; assert len(rooms) == 1; assert rooms[0]["id"] == sys.argv[1]; assert rooms[0]["name"] == "a|b"' "$MOCK_ID_4"
@@ -350,8 +586,8 @@ printf '1\ny\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM
 assert_contains "$(<"$TMUX_LOG")" "attach-session -t \$1"
 
 : > "$TMUX_LOG"
-attach_race_output=$(printf '1\ny\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_REVALIDATE_ID="\$2" TMUX_ROOM_DEVICE=devbox "$SCRIPT" || true)
-assert_contains "$attach_race_output" "Attachment aborted: room identity changed"
+attach_race_output=$(printf '1\ny\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_REVALIDATE_ID="\$2" TMUX_ROOM_DEVICE=devbox "$SCRIPT" 2>&1 || true)
+assert_contains "$attach_race_output" "Inspection aborted: room identity changed"
 assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
 
 : > "$TMUX_LOG"
@@ -448,7 +684,7 @@ assert_contains "$(<"$SSH_LOG")" "TMUX_ROOM_SOURCE_LABEL=remote"
 : > "$SSH_LOG"
 remote_inspect_output=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --inspect mini:alpha)
 assert_contains "$remote_inspect_output" "ROOM DETAILS"
-assert_contains "$(<"$SSH_LOG")" "-o BatchMode=yes mini-host env TMUX_ROOM_DEVICE=mini TMUX_ROOM_SOURCE_LABEL=remote tmux-room --inspect alpha"
+assert_contains "$(<"$SSH_LOG")" "-o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host env TMUX_ROOM_DEVICE=mini TMUX_ROOM_SOURCE_LABEL=remote tmux-room --inspect alpha"
 assert_not_contains "$(<"$SSH_LOG")" "ssh -t"
 
 : > "$SSH_LOG"
@@ -460,9 +696,109 @@ assert_contains "$(<"$SSH_LOG")" "tmux-room --json alpha"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" mini:alpha >/dev/null
 assert_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room alpha"
 
+FLEET_HOSTS="$MOCK/fleet-hosts"
+printf '%s\n' \
+  'mini mini-host' \
+  'down down-host' \
+  'badjson badjson-host' \
+  'tainted tainted-host' \
+  'hugeint hugeint-host' \
+  'large large-host' > "$FLEET_HOSTS"
+: > "$SSH_LOG"
+fleet_json=$(PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet-json)
+# shellcheck disable=SC2016
+printf '%s' "$fleet_json" | /usr/bin/python3 -c '
+import json
+import sys
+import unicodedata
+
+document = json.load(sys.stdin)
+assert document["schema"] == "tmux-room.fleet"
+assert document["schema_version"] == 1
+assert document["complete"] is False
+devices = {device["name"]: device for device in document["devices"]}
+assert list(devices) == ["devbox", "mini", "down", "badjson", "tainted", "hugeint", "large"]
+assert devices["devbox"]["status"] == "reachable"
+assert devices["mini"]["status"] == "reachable"
+assert devices["mini"]["source"] == "remote"
+assert devices["mini"]["rooms"][0]["id"] == "$9"
+assert devices["mini"]["rooms"][0]["name"] == "remote-review"
+assert devices["mini"]["rooms"][0]["metadata"]["state"] == "needs_input"
+assert devices["down"]["status"] == "unreachable"
+assert devices["down"]["error"] == "connection_failed"
+assert devices["badjson"]["status"] == "unsupported"
+assert devices["badjson"]["error"] == "unsupported_schema"
+assert devices["tainted"]["status"] == "invalid"
+assert devices["tainted"]["error"] == "invalid_inventory"
+assert devices["tainted"]["rooms"] == []
+assert devices["hugeint"]["status"] == "invalid"
+assert devices["hugeint"]["error"] == "invalid_inventory"
+assert devices["large"]["status"] == "invalid"
+assert devices["large"]["error"] == "inventory_too_large"
+assert devices["large"]["rooms"] == []
+
+def strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from strings(key)
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+
+for value in strings(document):
+    assert all(ch.isprintable() and not unicodedata.category(ch).startswith("C") for ch in value)
+'
+assert_not_contains "$fleet_json" "forged-device-name"
+assert_not_contains "$fleet_json" "mini-host"
+assert_not_contains "$fleet_json" "down-host"
+assert_not_contains "$fleet_json" "badjson-host"
+assert_not_contains "$fleet_json" "tainted-host"
+assert_not_contains "$fleet_json" "hugeint-host"
+assert_not_contains "$fleet_json" "large-host"
+assert_not_contains "$fleet_json" "must-not-leak"
+assert_not_contains "$fleet_json" "unsafe"
+
+fleet_alias=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --all --json)
+printf '%s' "$fleet_alias" | /usr/bin/python3 -c 'import json,sys; document=json.load(sys.stdin); assert document["schema"] == "tmux-room.fleet"; assert len(document["devices"]) == 7'
+
+fleet_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=72 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
+assert_contains "$fleet_output" "FLEET: 7 devices, 2 reachable, 5 unavailable"
+assert_contains "$fleet_output" "mini:remote-review"
+assert_contains "$fleet_output" "!needs_input"
+assert_contains "$fleet_output" "down=unreachable"
+assert_not_contains "$fleet_output" "mini-host"
+assert_not_contains "$fleet_output" "must-not-leak"
+assert_before "$fleet_output" "mini:remote-review" "devbox:alpha"
+assert_max_display_width "$fleet_output" 72
+
+: > "$SSH_LOG"
+fleet_picker_output=$(printf '/remote-review\n\nn\nq' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
+assert_contains "$fleet_picker_output" "SEARCH: remote-review"
+assert_contains "$fleet_picker_output" "ROOM DETAILS"
+assert_contains "$fleet_picker_output" "Attachment cancelled"
+assert_contains "$(<"$SSH_LOG")" "-o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1"
+assert_contains "$(<"$SSH_LOG")" "tmux-room --inspect-id 9 remote-review"
+assert_not_contains "$(<"$SSH_LOG")" "-t mini-host tmux-room --inspect-id"
+
+: > "$SSH_LOG"
+printf '/remote-review\n\ny\n' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet >/dev/null
+assert_contains "$(<"$SSH_LOG")" "-t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host tmux-room --attach-id 9 remote-review"
+
 : > "$TMUX_LOG"
 protected_kill_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_META_PROTECTED="${ESC}1${BIDI}" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)
 assert_contains "$protected_kill_output" "Kill refused: room is protected"
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+: > "$TMUX_LOG"
+conservative_protected=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_META_PROTECTED=off TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)
+assert_contains "$conservative_protected" "Kill refused: room is protected"
 assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
 
 : > "$TMUX_LOG"
@@ -479,6 +815,22 @@ assert_contains "$protected_during_snapshot" "Kill aborted: room became protecte
 assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
 
 : > "$TMUX_LOG"
+guard_read_failure=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_GUARD_READ_FAIL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)
+assert_contains "$guard_read_failure" "Kill refused: unable to verify the room protection state"
+assert_not_contains "$(<"$TMUX_LOG")" "atomic-kill"
+
+: > "$TMUX_LOG"
+atomic_blocked=$(printf 'alpha\nKILL\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ATOMIC_BLOCK=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)
+assert_contains "$atomic_blocked" "final tmux protection predicate blocked termination"
+assert_contains "$(<"$TMUX_LOG")" "if-shell -F -t $MOCK_ID_1:"
+assert_not_contains "$(<"$TMUX_LOG")" "atomic-kill"
+
+: > "$TMUX_LOG"
+atomic_failure=$(printf 'alpha\nKILL\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ATOMIC_FAIL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)
+assert_contains "$atomic_failure" "tmux could not evaluate the final protection predicate"
+assert_not_contains "$(<"$TMUX_LOG")" "atomic-kill"
+
+: > "$TMUX_LOG"
 cancel_one=$(printf 'wrong-room\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha)
 assert_contains "$cancel_one" "Kill cancelled"
 assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
@@ -492,6 +844,9 @@ assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
 kill_output=$(printf 'alpha\nKILL\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha)
 assert_contains "$kill_output" "Killed room: alpha"
 assert_contains "$(<"$TMUX_LOG")" "kill-session -t \$1"
+assert_contains "$(<"$TMUX_LOG")" "if-shell -F -t $MOCK_ID_1:"
+assert_contains "$(<"$TMUX_LOG")" '#{!:#{@tmux_room_protected}}'
+assert_contains "$(<"$TMUX_LOG")" "atomic-kill $MOCK_ID_1"
 assert_contains "$(<"$TMUX_LOG")" "display-message -p -t $MOCK_ID_1: #{session_id}|#{session_name}"
 assert_contains "$(<"$TMUX_LOG")" "list-panes -s -t $MOCK_ID_1 -F #{pane_pid}"
 assert_not_contains "$(<"$TMUX_LOG")" '-t =alpha'
@@ -512,6 +867,31 @@ arrow_close_output=$(printf '\033[Bxbeta\nKILL\n' | PATH="$MOCK:/usr/bin:/bin" T
 assert_contains "$arrow_close_output" "Killed room: beta"
 assert_contains "$(<"$TMUX_LOG")" "kill-session -t \$2"
 
+search_output=$(printf '/beta\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_contains "$search_output" "SEARCH: beta"
+assert_filtered_screen "$search_output" "beta" "beta" "alpha"
+
+note_search_output=$(printf '/review requested\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ATTENTION_FIXTURE=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_filtered_screen "$note_search_output" "review requested" "beta" "alpha"
+
+driver_search_output=$(printf '/claude\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ATTENTION_FIXTURE=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_filtered_screen "$driver_search_output" "claude" "beta" "alpha"
+
+state_search_output=$(printf '/needs_input\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ATTENTION_FIXTURE=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_filtered_screen "$state_search_output" "needs_input" "beta" "alpha"
+
+clear_output=$(printf '/beta\ncq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_filtered_screen "$clear_output" "beta" "beta" "alpha"
+assert_cleared_screen "$clear_output" "alpha" "beta"
+
+: > "$TMUX_LOG"
+no_match_output=$(printf '/missing-room\nxq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_contains "$no_match_output" "No rooms match this search."
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+dirty_search_output=$(printf '/beta%s\nq' "$BIDI" | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
+assert_not_contains "$dirty_search_output" "$BIDI"
+
 : > "$TMUX_LOG"
 cleanup_cancel_output=$(printf 'NO\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
 assert_contains "$cleanup_cancel_output" "STALE ROOM REVIEW"
@@ -523,7 +903,12 @@ assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
 cleanup_output=$(printf 'CLEANUP 1\nKILL STALE\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
 assert_contains "$cleanup_output" "Cleaned stale room: beta"
 assert_contains "$cleanup_output" "Cleanup complete: 1 cleaned, 0 skipped"
-assert_contains "$(<"$TMUX_LOG")" "display-message -p -t $MOCK_ID_2: #{session_id}|#{session_name}|#{session_attached}|#{session_activity}"
+assert_contains "$(<"$TMUX_LOG")" "display-message -p -t $MOCK_ID_2: #{session_id}|#{session_attached}|#{session_activity}|#{@tmux_room_pinned}|#{@tmux_room_protected}"
+assert_contains "$(<"$TMUX_LOG")" "if-shell -F -t $MOCK_ID_2:"
+assert_contains "$(<"$TMUX_LOG")" '#{==:#{session_attached},0}'
+assert_contains "$(<"$TMUX_LOG")" '#{!:#{@tmux_room_pinned}}'
+assert_contains "$(<"$TMUX_LOG")" '#{==:#{session_activity},1700003600}'
+assert_contains "$(<"$TMUX_LOG")" "atomic-kill $MOCK_ID_2"
 assert_contains "$(<"$TMUX_LOG")" "kill-session -t $MOCK_ID_2"
 
 : > "$TMUX_LOG"
@@ -542,6 +927,24 @@ assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
 
 cleanup_pinned=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_META_PINNED="${ESC}1${BIDI}" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
 assert_contains "$cleanup_pinned" "No stale rooms are eligible for cleanup"
+
+cleanup_conservative_pinned=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_META_PINNED=off TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
+assert_contains "$cleanup_conservative_pinned" "No stale rooms are eligible for cleanup"
+
+cleanup_guard_failure=$(PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_GUARD_READ_FAIL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
+assert_contains "$cleanup_guard_failure" "No stale rooms are eligible for cleanup"
+
+: > "$TMUX_LOG"
+cleanup_atomic_block=$(printf 'CLEANUP 1\nKILL STALE\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ATOMIC_BLOCK=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
+assert_contains "$cleanup_atomic_block" "Skipped room blocked by the final tmux safety predicate: beta"
+assert_contains "$cleanup_atomic_block" "Cleanup complete: 0 cleaned, 1 skipped"
+assert_not_contains "$(<"$TMUX_LOG")" "atomic-kill"
+
+: > "$TMUX_LOG"
+cleanup_atomic_failure=$(printf 'CLEANUP 1\nKILL STALE\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ATOMIC_FAIL=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
+assert_contains "$cleanup_atomic_failure" "tmux could not evaluate the final safety predicate: beta"
+assert_contains "$cleanup_atomic_failure" "Cleanup complete: 0 cleaned, 1 skipped"
+assert_not_contains "$(<"$TMUX_LOG")" "atomic-kill"
 
 : > "$SSH_LOG"
 PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" TMUX_ROOM_HOSTS_FILE="$HOSTS" "$SCRIPT" --kill mini:alpha >/dev/null
@@ -582,7 +985,7 @@ EOF
 chmod +x "$EMPTY/tmux"
 empty_output=$(PATH="$EMPTY:/usr/bin:/bin" TMUX_ROOM_DEVICE=empty "$SCRIPT" --list)
 assert_contains "$empty_output" "DEVICE: empty [local]"
-assert_contains "$empty_output" "No tmux rooms are running."
+assert_contains "$empty_output" "No rooms are available."
 
 if command -v tmux >/dev/null 2>&1; then
   REAL_TMUX_BIN=$(command -v tmux)

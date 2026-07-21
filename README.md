@@ -11,12 +11,11 @@ The default picker and `--list` stay compact, with one room per row:
 ```text
 DEVICE: mini [local]
 STATUS: CPU 12% load (0.96/8) · RAM 44% (13.9/31.3 GB)
-Use ↑/↓ to move · Enter inspect/attach · x close · q quit
+/ search | c clear | arrows move | Enter inspect/attach | x close | q quit
 
-  #  ROOM                         PROVIDER/MODEL           STATE     WINDOWS  LAST ACTIVE
-  -- ---------------------------- ------------------------ --------- -------  ----------------
-  1  kh-review                    claude-fable5-low        attached        2  2026-07-20 01:42
-  2  release-check                codex-gpt5.6-medium      detached        1  2026-07-20 00:18
+#  P ROOM                       DRIVER               ATTENTION     WIN LAST ACTIVE      NOTE
+ 1  * kh-review                  codex                !needs_input    2 2026-07-20 01:42 Review requested
+ 2    release-check              claude-fable5-low    detached        1 2026-07-20 00:18
 ```
 
 Select a room in the interactive picker to reveal its full detail card before attaching:
@@ -35,6 +34,9 @@ Attach this room? [y/N]:
 ```
 
 - Arrow-key navigation in interactive terminals (`↑`/`↓`, `Enter`, `x`, `q`)
+- `/` search across room, driver, attention state, note, and working path
+- Narrow, medium, and wide layouts that fit the detected terminal width
+- Attention-first ordering for `needs_input` and `failed`, followed by pinned and recently active rooms
 - Compact CPU-load and RAM status for each device
 - Provider/model/effort labels such as `claude-fable5-low` when safely discoverable
 - A once-daily cached release check that stays silent when current
@@ -66,6 +68,8 @@ export PATH="$HOME/bin:$PATH"
 ```bash
 tmux-room                 # compact picker; selection reveals details before attach
 tmux-room --list          # compact one-row-per-room table
+tmux-room --fleet         # searchable local and SSH-device picker
+tmux-room --fleet-json    # versioned aggregate fleet document
 tmux-room --inspect my-room
 tmux-room --json           # stable, machine-readable local inventory
 tmux-room --json my-room   # stable, machine-readable single-room inventory
@@ -107,6 +111,14 @@ List rooms across the local device and configured hosts:
 ```bash
 tmux-room --all
 ```
+
+`--all` keeps the original sequential device tables. For one responsive table and a shared search across every reachable device, use:
+
+```bash
+tmux-room --fleet
+```
+
+In an interactive terminal, `/` searches device, room, driver, state, note, and path. `Enter` inspects the selected immutable room identity, then asks before attaching. Without an interactive terminal, the same command prints a compact table. Unreachable, unsupported, and invalid devices stay visible in the fleet status instead of disappearing.
 
 Attach through the registry:
 
@@ -164,6 +176,39 @@ Remote inspect and JSON commands are read-only and use SSH batch mode without al
 The `id` is the raw immutable tmux session ID. Consumers should use it for mutation and revalidate both ID and name before destructive work.
 
 The JSON inventory reads tmux session fields, the first pane working directory, and the public options documented below. The `path` field is the absolute current working directory reported by tmux for the first pane. It does not read pane contents or process environments. Control characters and bidirectional formatting controls in externally written metadata are removed before display or JSON encoding.
+
+## Aggregate fleet JSON contract
+
+`tmux-room --fleet-json` emits the `tmux-room.fleet` schema. `tmux-room --all --json` is an alias. Version 1 has this shape:
+
+```json
+{
+  "schema": "tmux-room.fleet",
+  "schema_version": 1,
+  "generated_at": 1784649600,
+  "complete": false,
+  "devices": [
+    {
+      "name": "devbox",
+      "source": "local",
+      "status": "reachable",
+      "inventory_generated_at": 1784649599,
+      "rooms": []
+    },
+    {
+      "name": "mini",
+      "source": "remote",
+      "status": "unreachable",
+      "error": "connection_failed",
+      "rooms": []
+    }
+  ]
+}
+```
+
+Consumers must check `schema_version`, then handle `reachable`, `unreachable`, `unsupported`, and `invalid` device statuses. `complete` is false if any configured device could not provide a valid inventory. Reachable devices contain the same whitelisted room objects as `tmux-room.inventory`.
+
+Remote inventory uses SSH batch mode, a connection timeout, and no pseudo-terminal. Each response must be valid version 1 inventory JSON within the configured size limit. Invalid JSON, unsupported schemas, duplicate identities, invalid types, control characters, and oversized responses become explicit device errors. Remote SSH targets, stderr, pane contents, and process environments are never copied into fleet JSON.
 
 ## Public room metadata
 
@@ -228,7 +273,7 @@ tmux-room --cleanup-stale
 tmux-room --cleanup-stale --days 30
 ```
 
-Attached, pinned, and protected rooms are never candidates. Cleanup prints the complete candidate list and requires two exact confirmations: `CLEANUP <count>` and `KILL STALE`. Before each kill, it checks the immutable ID, name, attached state, activity timestamp, pinned flag, and protected flag. It repeats those checks after the final resource snapshot. Any changed room is skipped.
+Attached, pinned, and protected rooms are never candidates. Cleanup prints the complete candidate list and requires two exact confirmations: `CLEANUP <count>` and `KILL STALE`. Before each kill, it checks the immutable ID, name, attached state, exact activity timestamp, pinned flag, and protected flag. It repeats those checks after the final resource snapshot. A final tmux-side predicate requires the same activity timestamp, detached state, and false pinned and protected options. Only its true branch queues the immutable-ID kill. Any changed room or unreadable guard is skipped.
 
 ## Safe room termination
 
@@ -239,7 +284,7 @@ Termination requires both:
 1. Type the exact room name.
 2. Type the uppercase word `KILL`.
 
-The inspected tmux `#{session_id}` is captured before confirmation and revalidated immediately before termination. The final command targets that immutable ID, so a replacement room reusing the same name is not killed. A final best-effort process/RSS snapshot is also taken immediately before the command. tmux may not terminate detached, daemonized, reparented, or signal-ignoring descendants. Model context usage is displayed only when it can be read safely and reliably; otherwise the UI says `CONTEXT: unavailable`.
+The inspected tmux `#{session_id}` is captured before confirmation and revalidated immediately before termination. Guard reads fail closed. A final tmux-side predicate requires the immutable ID and a false protected option. Only its true branch queues the kill. A replacement room reusing the same name is not killed. A final best-effort process/RSS snapshot is also taken immediately before the command. tmux may not terminate detached, daemonized, reparented, or signal-ignoring descendants. Model context usage is displayed only when it can be read safely and reliably; otherwise the UI says `CONTEXT: unavailable`.
 
 A room with `@tmux_room_protected=1` cannot be killed directly or through stale cleanup. Clear protection explicitly with `tmux-room --metadata <room> --unprotected` before termination.
 
