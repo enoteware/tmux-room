@@ -417,6 +417,7 @@ printf 'q\n' | PATH="$MOCK:/usr/bin:/bin" CURL_MOCK_LOG="$CURL_LOG" TMUX_MOCK_LO
 
 UPDATE_DIR="$MOCK/update"
 mkdir -p "$UPDATE_DIR"
+UPDATE_REAL_DIR=$(cd "$UPDATE_DIR" && pwd -P)
 UPDATE_COPY="$UPDATE_DIR/tmux-room"
 UPDATE_PAYLOAD="$UPDATE_DIR/payload"
 cp "$SCRIPT" "$UPDATE_COPY"
@@ -445,7 +446,7 @@ updated_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_MOCK_LOG="$CURL_LOG" CURL_UPDAT
 assert_contains "$updated_output" "Updated tmux-room: tmux-room 9.9.9"
 [[ "$($UPDATE_COPY --version)" == "tmux-room 9.9.9" ]] || fail "self-update did not atomically replace the copied script"
 [[ "$(/usr/bin/python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$UPDATE_COPY")" == "751" ]] || fail "self-update did not preserve mode"
-assert_contains "$(<"$CURL_LOG")" "-o $UPDATE_DIR/.tmux-room.update."
+assert_contains "$(<"$CURL_LOG")" "-o $UPDATE_REAL_DIR/.tmux-room.update."
 assert_no_entry_with_prefix "$UPDATE_DIR" ".tmux-room.update."
 
 INVALID_UPDATE="$UPDATE_DIR/invalid-payload"
