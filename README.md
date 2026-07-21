@@ -238,7 +238,7 @@ tmux-room --metadata kh-review \
   --protected
 ```
 
-Clear values with `--clear-driver`, `--clear-state`, `--clear-note`, `--unpinned`, and `--unprotected`. Each update snapshots exactly the requested options, targets the immutable session ID, and revalidates the room identity throughout the transaction. If a write fails, tmux-room restores the snapshot. `--state` writes the current epoch to `@tmux_room_state_at` before committing the new state; `--clear-state` clears both options.
+Unset driver, state, and note values with `--clear-driver`, `--clear-state`, and `--clear-note`. Disable the per-room flags with `--unpinned` and `--unprotected`; these explicit false overrides take precedence over enabled global defaults. Each update snapshots exactly the requested options, targets the immutable session ID, and revalidates the room identity throughout the transaction. If a write fails, tmux-room restores the snapshot. `--state` writes the current epoch to `@tmux_room_state_at` before committing the new state; `--clear-state` clears both options.
 
 Writable states are `running`, `idle`, `needs_input`, `failed`, `completed`, and `ended`. `unknown` is the honest unset or invalid fallback. `stale` is derived and cannot be written through the CLI.
 

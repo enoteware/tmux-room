@@ -1453,6 +1453,10 @@ PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="
   fail "real unpinned flag inherited the global default"
 [[ "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -v -t renamed-room @tmux_room_protected)" == "0" ]] || \
   fail "real unprotected flag inherited the global default"
+[[ "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -gv @tmux_room_pinned)" == "1" ]] || \
+  fail "real unpinned update changed the global default"
+[[ "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -gv @tmux_room_protected)" == "1" ]] || \
+  fail "real unprotected update changed the global default"
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -gu @tmux_room_pinned
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" set-option -gu @tmux_room_protected
 real_boundary=$(printf 'boundary-room\nKILL\n' | PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" \
