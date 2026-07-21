@@ -58,7 +58,7 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 }
 
 bash -n "$SCRIPT"
-[[ "$($SCRIPT --version)" == "tmux-room 0.3.0" ]] || fail "version should be 0.3.0"
+[[ "$($SCRIPT --version)" == "tmux-room 0.4.0" ]] || fail "version should be 0.4.0"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"

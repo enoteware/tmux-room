@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.3.0"
+TMUX_ROOM_VERSION="0.4.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
