@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.5.0"
+TMUX_ROOM_VERSION="0.5.1"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
@@ -80,7 +80,7 @@ Workspace options for --new:
   --start                         Send the hardcoded /start prompt after boot
 
 Open options (--open / --launch):
-  --client <slug>                 Skip the client menu
+  --client <id|slug>              Skip the client menu (Invoi id or folder)
   --agent <name>                  Skip the agent menu
   --model <id>                    Skip the model menu
   --cwd <existing-directory>      Override the client working directory
@@ -1758,43 +1758,190 @@ models_for_agent() {
   esac
 }
 
-add_client_entry() {
-  local slug="$1" path="$2" i
-  valid_client_slug "$slug" || return 1
-  [[ -d "$path" ]] || return 1
-  path=$(cd -- "$path" 2>/dev/null && pwd -P) || return 1
-  for i in "${!client_slugs[@]}"; do
-    if [[ "${client_slugs[i]}" == "$slug" ]]; then
-      return 0
-    fi
-  done
-  client_slugs+=("$slug")
-  client_paths+=("$path")
+is_git_worktree() {
+  [[ -f "$1/.git" ]]
 }
 
 load_client_catalog() {
   local code_dir="${TMUX_ROOM_CODE_DIR:-$HOME/code}"
   local clients_file="${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients}"
-  local dir slug path line
+  local catalog kind key label slug path
   client_slugs=()
   client_paths=()
-  if [[ -f "$clients_file" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      [[ -z "$line" || "$line" == \#* ]] && continue
-      slug="${line%%[[:space:]]*}"
-      path="${line#"$slug"}"
-      path="${path#"${path%%[![:space:]]*}"}"
-      add_client_entry "$slug" "$path" || true
-    done < "$clients_file"
-  fi
-  if [[ -d "$code_dir" ]]; then
-    for dir in "$code_dir"/*; do
-      [[ -d "$dir" ]] || continue
-      [[ -d "$dir/.git" || -f "$dir/.git" ]] || continue
-      slug=$(basename -- "$dir")
-      add_client_entry "$slug" "$dir" || true
-    done
-  fi
+  client_ids=()
+  client_labels=()
+  client_menu_keys=()
+  client_menu_labels=()
+  catalog=$(
+    TMUX_ROOM_CODE_DIR="$code_dir" \
+    TMUX_ROOM_CLIENTS_FILE="$clients_file" \
+    python3 - <<'PY'
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+code_dir = Path(os.environ.get("TMUX_ROOM_CODE_DIR") or "")
+clients_file = Path(os.environ.get("TMUX_ROOM_CLIENTS_FILE") or "")
+slug_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+def clean(value):
+    return "".join(ch for ch in (value or "") if ch == " " or (ch.isprintable() and ch not in "\t\n\r"))
+
+def read_env_client_id(path):
+    env = path / ".env.local"
+    if not env.is_file():
+        return ""
+    try:
+        text = env.read_text(errors="ignore")
+    except OSError:
+        return ""
+    default = ""
+    client = ""
+    for line in text.splitlines():
+        if line.startswith("INVOI_DEFAULT_CLIENT_ID="):
+            default = line.split("=", 1)[1].strip().strip("\"'")
+        elif line.startswith("INVOI_CLIENT_ID="):
+            client = line.split("=", 1)[1].strip().strip("\"'")
+    value = default or client
+    return value if value.isdigit() else ""
+
+def is_worktree(path):
+    return (path / ".git").is_file()
+
+names = {}
+try:
+    result = subprocess.run(
+        ["invoi", "clients", "list"],
+        capture_output=True, text=True, timeout=8, check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        payload = json.loads(result.stdout)
+        for row in payload.get("clients") or []:
+            client_id = str(row.get("id") or "")
+            if not client_id.isdigit():
+                continue
+            names[client_id] = {
+                "name": clean(row.get("name") or ""),
+                "short": clean(row.get("short_name") or ""),
+            }
+except (OSError, ValueError, json.JSONDecodeError):
+    pass
+
+overrides = []
+if clients_file.is_file():
+    try:
+        for raw in clients_file.read_text(errors="ignore").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) == 2:
+                slug, path = parts
+            elif len(parts) >= 3 and parts[0].isdigit():
+                slug, path = parts[1], parts[2]
+            else:
+                continue
+            path_obj = Path(path)
+            if slug_re.match(slug) and path_obj.is_dir() and not is_worktree(path_obj):
+                overrides.append((slug, str(path_obj.resolve()), read_env_client_id(path_obj)))
+    except OSError:
+        pass
+
+repos = []
+seen = set()
+
+def add_repo(slug, path, client_id):
+    if not slug_re.match(slug):
+        return
+    path_obj = Path(path)
+    if not path_obj.is_dir() or is_worktree(path_obj):
+        return
+    resolved = str(path_obj.resolve())
+    if resolved in seen:
+        return
+    seen.add(resolved)
+    repos.append({"slug": slug, "path": resolved, "id": client_id or ""})
+
+for slug, path, client_id in overrides:
+    add_repo(slug, path, client_id)
+
+if code_dir.is_dir():
+    for path in sorted(code_dir.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_dir() or path.name.startswith(".") or path.name.startswith("_"):
+            continue
+        if is_worktree(path):
+            continue
+        git_dir = path / ".git"
+        client_id = read_env_client_id(path)
+        if not git_dir.is_dir() and not client_id:
+            continue
+        add_repo(path.name, path, client_id)
+
+def match_client_id(slug):
+    compact = re.sub(r"[^a-z0-9]+", "", slug.lower())
+    if not compact:
+        return ""
+    for client_id, meta in names.items():
+        short = re.sub(r"[^a-z0-9]+", "", (meta["short"] or "").lower())
+        name = re.sub(r"[^a-z0-9]+", "", (meta["name"] or "").lower())
+        if compact == short or compact == name:
+            return client_id
+        if len(compact) >= 3 and compact in name:
+            return client_id
+    return ""
+
+for repo in repos:
+    if not repo["id"]:
+        repo["id"] = match_client_id(repo["slug"])
+
+def label_for(key, slug):
+    if key.isdigit() and key in names:
+        short = names[key]["short"]
+        name = names[key]["name"]
+        extra = short if short and short.lower() != name.lower() else ""
+        if extra:
+            return "%s  %s  %s" % (key, extra, name)
+        if name:
+            return "%s  %s" % (key, name)
+        return key
+    if key.isdigit():
+        return "%s  %s" % (key, slug)
+    return slug
+
+groups = {}
+for repo in repos:
+    key = repo["id"] or repo["slug"]
+    groups.setdefault(key, []).append(repo)
+
+def sort_key(item):
+    key, _rows = item
+    if key.isdigit():
+        return (0, int(key), key)
+    return (1, 0, key.lower())
+
+for key, rows in sorted(groups.items(), key=sort_key):
+    print("C\t%s\t%s" % (key, label_for(key, rows[0]["slug"])))
+    for repo in sorted(rows, key=lambda item: item["slug"].lower()):
+        print("R\t%s\t%s\t%s\t%s" % (key, repo["slug"], repo["path"], label_for(key, repo["slug"])))
+PY
+  ) || catalog=""
+  while IFS=$'\t' read -r kind key slug path label || [[ -n "$kind" ]]; do
+    [[ -z "$kind" ]] && continue
+    case "$kind" in
+      C)
+        client_menu_keys+=("$key")
+        client_menu_labels+=("$slug")
+        ;;
+      R)
+        client_ids+=("$key")
+        client_slugs+=("$slug")
+        client_paths+=("$path")
+        client_labels+=("$label")
+        ;;
+    esac
+  done <<< "$catalog"
 }
 
 client_path_for() {
@@ -1808,25 +1955,61 @@ client_path_for() {
   return 1
 }
 
-sort_client_slugs() {
-  local preferred="$1" i slug
-  local -a preferred_slugs other_slugs preferred_paths other_paths
-  preferred_slugs=()
-  other_slugs=()
-  preferred_paths=()
-  other_paths=()
+resolve_open_client() {
+  local token="$1" i matches match_slug
+  resolved_client=""
+  resolved_client_id=""
+  [[ -n "$token" ]] || return 1
   for i in "${!client_slugs[@]}"; do
-    slug="${client_slugs[i]}"
-    if [[ "$slug" == "$preferred" ]]; then
-      preferred_slugs+=("$slug")
-      preferred_paths+=("${client_paths[i]}")
-    else
-      other_slugs+=("$slug")
-      other_paths+=("${client_paths[i]}")
+    if [[ "${client_slugs[i]}" == "$token" ]]; then
+      resolved_client="${client_slugs[i]}"
+      resolved_client_id="${client_ids[i]}"
+      return 0
     fi
   done
-  client_slugs=("${preferred_slugs[@]}" "${other_slugs[@]}")
-  client_paths=("${preferred_paths[@]}" "${other_paths[@]}")
+  matches=0
+  match_slug=""
+  for i in "${!client_ids[@]}"; do
+    if [[ "${client_ids[i]}" == "$token" ]]; then
+      matches=$((matches + 1))
+      match_slug="${client_slugs[i]}"
+      resolved_client_id="${client_ids[i]}"
+    fi
+  done
+  if ((matches == 1)); then
+    resolved_client="$match_slug"
+    return 0
+  fi
+  if ((matches > 1)); then
+    resolved_client=$(launch_pref_get "pref.$token.slug" || true)
+    if [[ -n "$resolved_client" ]] && client_path_for "$resolved_client" >/dev/null; then
+      return 0
+    fi
+    resolved_client="$match_slug"
+    return 0
+  fi
+  return 1
+}
+
+sort_client_menu() {
+  local preferred="$1" i key
+  local -a preferred_keys other_keys preferred_labels other_labels
+  preferred_keys=()
+  other_keys=()
+  preferred_labels=()
+  other_labels=()
+  for i in "${!client_menu_keys[@]}"; do
+    key="${client_menu_keys[i]}"
+    if [[ "$key" == "$preferred" ]]; then
+      preferred_keys+=("$key")
+      preferred_labels+=("${client_menu_labels[i]}")
+    else
+      other_keys+=("$key")
+      other_labels+=("${client_menu_labels[i]}")
+    fi
+  done
+  client_menu_keys=("${preferred_keys[@]}" "${other_keys[@]}")
+  client_menu_labels=("${preferred_labels[@]}" "${other_labels[@]}")
 }
 
 menu_pick() {
@@ -1927,9 +2110,9 @@ next_fresh_room_name() {
 
 open_launch_wizard() {
   local client="" agent="" model="" cwd="" fresh=0 no_attach=0 start=1
-  local room path default_client default_agent default_model
+  local room path default_client default_agent default_model default_client_key default_label i
   local last_saved_agent last_saved_model model_default_ok models_text pick_rc agent_default_ok
-  local -a agent_choices model_choices create_args
+  local -a agent_choices model_choices create_args repo_choices
   created_session_id=""
   while (($# > 0)); do
     case "$1" in
@@ -1970,20 +2153,29 @@ open_launch_wizard() {
 
   load_client_catalog
   default_client=$(launch_pref_get last_client || true)
-  sort_client_slugs "$default_client"
+  default_client_key=$(launch_pref_get last_client_id || true)
+  [[ -n "$default_client_key" ]] || default_client_key="$default_client"
+  sort_client_menu "$default_client_key"
 
   if [[ -z "$client" ]]; then
-    if ((${#client_slugs[@]} == 0)); then
+    if ((${#client_menu_keys[@]} == 0)); then
       echo "No clients found. Add slug /path lines to ${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients} or clone a repo into ${TMUX_ROOM_CODE_DIR:-$HOME/code}." >&2
       return 1
     fi
     if [[ ! -t 0 || ! -t 1 ]]; then
-      echo "Usage: tmux-room --open --client <slug> --agent <name> [--model <id>]" >&2
+      echo "Usage: tmux-room --open --client <id|slug> --agent <name> [--model <id>]" >&2
       return 2
     fi
+    default_label=""
+    for i in "${!client_menu_keys[@]}"; do
+      if [[ "${client_menu_keys[i]}" == "$default_client_key" || "${client_menu_keys[i]}" == "$default_client" ]]; then
+        default_label="${client_menu_labels[i]}"
+        break
+      fi
+    done
     while true; do
       pick_rc=0
-      menu_pick "Client" "$default_client" "${client_slugs[@]}" || pick_rc=$?
+      menu_pick "Client" "$default_label" "${client_menu_labels[@]}" || pick_rc=$?
       if ((pick_rc == 2)); then
         echo "Cancelled." >&2
         return 1
@@ -1992,17 +2184,52 @@ open_launch_wizard() {
         break
       fi
     done
-    client="$menu_choice"
+    for i in "${!client_menu_labels[@]}"; do
+      if [[ "${client_menu_labels[i]}" == "$menu_choice" ]]; then
+        client="${client_menu_keys[i]}"
+        break
+      fi
+    done
   fi
+  if ! resolve_open_client "$client"; then
+    echo "Unknown client: $(sanitize_text "$client")" >&2
+    return 2
+  fi
+  client="$resolved_client"
   valid_client_slug "$client" || { echo "Invalid client slug." >&2; return 2; }
+
+  repo_choices=()
+  for i in "${!client_slugs[@]}"; do
+    if [[ "${client_ids[i]}" == "$resolved_client_id" && -n "$resolved_client_id" ]]; then
+      repo_choices+=("${client_slugs[i]}")
+    elif [[ "${client_slugs[i]}" == "$client" ]]; then
+      repo_choices+=("${client_slugs[i]}")
+    fi
+  done
+  if ((${#repo_choices[@]} > 1)) && [[ -z "$cwd" ]]; then
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      :
+    else
+      while true; do
+        pick_rc=0
+        menu_pick "Repo" "$client" "${repo_choices[@]}" || pick_rc=$?
+        if ((pick_rc == 2)); then
+          echo "Cancelled." >&2
+          return 1
+        fi
+        if ((pick_rc == 0)); then
+          client="$menu_choice"
+          break
+        fi
+      done
+    fi
+  fi
 
   if [[ -z "$cwd" ]]; then
     cwd=$(client_path_for "$client" || true)
-    if [[ -z "$cwd" ]]; then
-      if [[ -d "${TMUX_ROOM_CODE_DIR:-$HOME/code}/$client" ]]; then
-        cwd=$(cd -- "${TMUX_ROOM_CODE_DIR:-$HOME/code}/$client" 2>/dev/null && pwd -P) || true
-      fi
-    fi
+  fi
+  if [[ -n "$cwd" ]] && is_git_worktree "$cwd"; then
+    cwd=""
   fi
   if [[ -z "$cwd" || ! -d "$cwd" ]]; then
     echo "No working directory for client $client. Pass --cwd or add it to ${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients}." >&2
@@ -2119,11 +2346,13 @@ open_launch_wizard() {
     else
       launch_pref_write \
         "last_client=$client" \
+        "last_client_id=$resolved_client_id" \
         "last_agent=$agent" \
         "last_model=$model" \
         "pref.$client.agent=$agent" \
         "pref.$client.$agent.model=$model" \
-        "pref.$client.path=$cwd"
+        "pref.$client.path=$cwd" \
+        ${resolved_client_id:+pref.$resolved_client_id.slug=$client}
       echo "Room already exists: $room"
       if ((no_attach == 1)); then
         return 0
@@ -2139,11 +2368,13 @@ open_launch_wizard() {
   new_local_room "${create_args[@]}" || return $?
   launch_pref_write \
     "last_client=$client" \
+    "last_client_id=$resolved_client_id" \
     "last_agent=$agent" \
     "last_model=$model" \
     "pref.$client.agent=$agent" \
     "pref.$client.$agent.model=$model" \
-    "pref.$client.path=$cwd"
+    "pref.$client.path=$cwd" \
+    ${resolved_client_id:+pref.$resolved_client_id.slug=$client}
   if ((no_attach == 1)); then
     return 0
   fi

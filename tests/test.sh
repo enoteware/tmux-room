@@ -70,7 +70,7 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 
 bash -n "$SCRIPT"
 bash -n "$ROOT/install.sh"
-[[ "$($SCRIPT --version)" == "tmux-room 0.5.0" ]] || fail "version should be 0.5.0"
+[[ "$($SCRIPT --version)" == "tmux-room 0.5.1" ]] || fail "version should be 0.5.1"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"
@@ -484,7 +484,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'TMUX_ROOM_VERSION="broken"' '(' > "$INVALID
 cp "$SCRIPT" "$UPDATE_DIR/invalid-copy"
 invalid_update_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" "$UPDATE_DIR/invalid-copy" --update 2>&1 || true)
 assert_contains "$invalid_update_output" "syntax error"
-[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.5.0" ]] || fail "invalid update replaced the installed copy"
+[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.5.1" ]] || fail "invalid update replaced the installed copy"
 
 invalid_install_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" 2>&1 || true)
@@ -496,11 +496,11 @@ MISSING_VERSION="$UPDATE_DIR/missing-version"
 printf '%s\n' '#!/usr/bin/env bash' 'echo missing' > "$MISSING_VERSION"
 cp "$SCRIPT" "$UPDATE_DIR/missing-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$MISSING_VERSION" "$UPDATE_DIR/missing-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.5.0" ]] || fail "versionless update replaced the installed copy"
+[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.5.1" ]] || fail "versionless update replaced the installed copy"
 
 cp "$SCRIPT" "$UPDATE_DIR/download-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 "$UPDATE_DIR/download-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.5.0" ]] || fail "failed download replaced the installed copy"
+[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.5.1" ]] || fail "failed download replaced the installed copy"
 
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" >/dev/null 2>&1 || true
@@ -927,7 +927,9 @@ unsafe_model_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_
 assert_contains "$unsafe_model_output" "Invalid model id"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
 
-mkdir -p "$MOCK/code/acme/.git"
+mkdir -p "$MOCK/code/acme/.git" "$MOCK/code/acme-task-99" "$MOCK/code/cal_strat"
+printf 'gitdir: %s\n' "$MOCK/code/acme/.git" > "$MOCK/code/acme-task-99/.git"
+printf 'INVOI_CLIENT_ID=128\n' > "$MOCK/code/cal_strat/.env.local"
 cat > "$MOCK/grok" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -945,6 +947,22 @@ assert_contains "$(<"$TMUX_LOG")" "grok --model grok-4.6 /start"
 assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "last_client=acme"
 assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "pref.acme.agent=grok"
 assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "pref.acme.grok.model=grok-4.6"
+
+: > "$TMUX_LOG"
+open_worktree=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client acme-task-99 --agent grok --model grok-4.6 --no-attach 2>&1 || true)
+assert_contains "$open_worktree" "Unknown client: acme-task-99"
+assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+
+: > "$TMUX_LOG"
+open_by_id=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client 128 --agent grok --model grok-4.6 --no-attach)
+assert_contains "$open_by_id" "Created room: cal_strat-grok (\$3)"
+CAL_STRAT_REAL=$(cd "$MOCK/code/cal_strat" && pwd -P)
+assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s cal_strat-grok -c $CAL_STRAT_REAL grok --model grok-4.6 /start"
+printf 'acme-grok\n' > "$TMUX_STATE/new-room"
 
 : > "$TMUX_LOG"
 open_again=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
