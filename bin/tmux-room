@@ -719,10 +719,23 @@ for line in result.stdout.splitlines():
         except ValueError:
             pass
 children = {}
+parent_by_pid = {}
 args_by_pid = {}
 for pid, ppid, args in ps_rows:
     children.setdefault(ppid, []).append(pid)
+    parent_by_pid[pid] = ppid
     args_by_pid[pid] = args
+
+def pane_for_pid(pid, pane_items):
+    roots = {root_pid: pane_id for pane_id, root_pid, _ in pane_items}
+    current = pid
+    visited = set()
+    while current and current not in visited:
+        if current in roots:
+            return roots[current]
+        visited.add(current)
+        current = parent_by_pid.get(current)
+    return pane_items[0][0]
 
 def identify(args):
     low = args.lower()
@@ -789,7 +802,7 @@ for sid, pane_items in panes.items():
         if provider:
             found = label(args, provider)
             found_provider = provider
-            found_pane = next((pane_id for pane_id, root_pid, _ in pane_items if root_pid in seen), pane_items[0][0])
+            found_pane = pane_for_pid(pid, pane_items)
             break
         queue.extend(children.get(pid, []))
     if not found:
@@ -1774,7 +1787,6 @@ add_client_entry() {
   path=$(cd -- "$path" 2>/dev/null && pwd -P) || return 1
   for i in "${!client_slugs[@]}"; do
     if [[ "${client_slugs[i]}" == "$slug" ]]; then
-      client_paths[i]="$path"
       return 0
     fi
   done
@@ -2012,6 +2024,16 @@ open_launch_wizard() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" ]] && model_choices+=("$line")
   done < <(models_for_agent "$agent")
+  if [[ -n "$default_model" && ${#model_choices[@]} -gt 0 ]]; then
+    model_default_ok=0
+    for m in "${model_choices[@]}"; do
+      if [[ "$m" == "$default_model" ]]; then
+        model_default_ok=1
+        break
+      fi
+    done
+    ((model_default_ok == 0)) && default_model=""
+  fi
   if [[ -z "$model" ]]; then
     if ((${#model_choices[@]} == 0)); then
       model=""
@@ -2058,7 +2080,12 @@ open_launch_wizard() {
         return 0
       fi
       echo "Attaching to $room. Detach with Ctrl-b then d."
-      exec tmux attach-session -t "$found_session_id"
+      if [[ -n "${TMUX:-}" ]]; then
+        tmux switch-client -t "$found_session_id"
+      else
+        exec tmux attach-session -t "$found_session_id"
+      fi
+      return $?
     fi
   fi
 
@@ -2077,7 +2104,11 @@ open_launch_wizard() {
     return 0
   fi
   echo "Attaching to $room. Detach with Ctrl-b then d."
-  exec tmux attach-session -t "$created_session_id"
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "$created_session_id"
+  else
+    exec tmux attach-session -t "$created_session_id"
+  fi
 }
 
 new_local_room() {
