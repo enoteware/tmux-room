@@ -1982,13 +1982,15 @@ open_launch_wizard() {
       return 2
     fi
     while true; do
-      menu_pick "Client" "$default_client" "${client_slugs[@]}"
-      pick_rc=$?
+      pick_rc=0
+      menu_pick "Client" "$default_client" "${client_slugs[@]}" || pick_rc=$?
       if ((pick_rc == 2)); then
         echo "Cancelled." >&2
         return 1
       fi
-      ((pick_rc == 0)) && break
+      if ((pick_rc == 0)); then
+        break
+      fi
     done
     client="$menu_choice"
   fi
@@ -2035,13 +2037,15 @@ open_launch_wizard() {
     fi
     [[ -n "$default_agent" ]] || default_agent="${agent_choices[0]}"
     while true; do
-      menu_pick "Agent" "$default_agent" "${agent_choices[@]}"
-      pick_rc=$?
+      pick_rc=0
+      menu_pick "Agent" "$default_agent" "${agent_choices[@]}" || pick_rc=$?
       if ((pick_rc == 2)); then
         echo "Cancelled." >&2
         return 1
       fi
-      ((pick_rc == 0)) && break
+      if ((pick_rc == 0)); then
+        break
+      fi
     done
     agent="$menu_choice"
   fi
@@ -2085,8 +2089,8 @@ open_launch_wizard() {
     else
       [[ -n "$default_model" ]] || default_model="${model_choices[0]}"
       while true; do
-        menu_pick "Model (or type a model id)" "$default_model" "${model_choices[@]}"
-        pick_rc=$?
+        pick_rc=0
+        menu_pick "Model (or type a model id)" "$default_model" "${model_choices[@]}" || pick_rc=$?
         if ((pick_rc == 2)); then
           echo "Cancelled." >&2
           return 1
