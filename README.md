@@ -272,11 +272,13 @@ Allowed agent names are `claude`, `codex`, `grok`, `gemini`, `cursor`, and `herm
 
 Enter accepts the last choice for that client. The room name is `{client}-{agent}`. If that room already exists, tmux-room attaches it. `--fresh` makes `{client}-{agent}-2` instead.
 
-Clients come from `~/code` git folders and optional lines in `~/.config/tmux-room/clients`:
+The client menu is grouped by Invoi client id (`128  CS  California Strategies`). Starred Invoi clients are marked with `*` and listed first. Git worktrees are skipped. If one client has more than one checkout, a second repo menu appears. Internal tools and other folders without an Invoi id still show after the Invoi clients.
+
+Optional path pins live in `~/.config/tmux-room/clients`:
 
 ```text
 regably /home/elliot/code/regably
-invoi /home/elliot/code/invoi
+128 cal_strat /home/elliot/code/cal_strat
 ```
 
 Last client, last agent, and per-client defaults are stored in `~/.config/tmux-room/launch`. `--open` sends `/start` so Claude runs the session-start workflow. Other agents get the same first prompt.
@@ -284,6 +286,7 @@ Last client, last agent, and per-client defaults are stored in `~/.config/tmux-r
 Skip the menus when you already know the answers:
 
 ```bash
+tmux-room --open --client 128 --agent grok --model grok-4.6
 tmux-room --open --client regably --agent grok --model grok-4.6
 ```
 
