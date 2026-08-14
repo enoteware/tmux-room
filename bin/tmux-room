@@ -1828,7 +1828,7 @@ try:
                 "short": clean(row.get("short_name") or ""),
                 "favorite": bool(row.get("is_favorite")),
             }
-except (OSError, ValueError, json.JSONDecodeError):
+except (OSError, ValueError, subprocess.TimeoutExpired):
     pass
 
 overrides = []
