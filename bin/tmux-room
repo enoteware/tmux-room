@@ -684,15 +684,11 @@ session_details() {
 }
 
 load_compact_agent_inventory() {
-  local pane_rows session_id label
+  local pane_rows session_id label inventory
   compact_agent_ids=()
   compact_agent_labels=()
   pane_rows=$(tmux list-panes -a -F '#{session_id}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_title}' 2>/dev/null || true)
-  while IFS=$'\t' read -r session_id label; do
-    [[ -z "$session_id" ]] && continue
-    compact_agent_ids+=("$session_id")
-    compact_agent_labels+=("$label")
-  done < <(TMUX_ROOM_AGENT_INVENTORY=1 TMUX_ROOM_PANE_ROWS="$pane_rows" python3 - <<'PY'
+  inventory=$(TMUX_ROOM_AGENT_INVENTORY=1 TMUX_ROOM_PANE_ROWS="$pane_rows" python3 - <<'PY'
 import os
 import re
 import subprocess
@@ -817,7 +813,12 @@ for sid, pane_items in panes.items():
         found = pane_model(found_pane or pane_items[0][0], found_provider)
     print(f'{sid}\t{found or "none"}')
 PY
-  )
+)
+  while IFS=$'\t' read -r session_id label; do
+    [[ -z "$session_id" ]] && continue
+    compact_agent_ids+=("$session_id")
+    compact_agent_labels+=("$label")
+  done <<< "$inventory"
 }
 
 compact_agent_label() {
@@ -1938,7 +1939,7 @@ next_fresh_room_name() {
 open_launch_wizard() {
   local client="" agent="" model="" cwd="" fresh=0 no_attach=0 start=1
   local room path default_client default_agent default_model
-  local last_saved_agent last_saved_model model_default_ok
+  local last_saved_agent last_saved_model model_default_ok models_text
   local -a agent_choices model_choices create_args
   created_session_id=""
   while (($# > 0)); do
@@ -2039,9 +2040,10 @@ open_launch_wizard() {
     fi
   fi
   model_choices=()
+  models_text=$(models_for_agent "$agent")
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" ]] && model_choices+=("$line")
-  done < <(models_for_agent "$agent")
+  done <<< "$models_text"
   if [[ -n "$default_model" && ${#model_choices[@]} -gt 0 ]]; then
     model_default_ok=0
     for m in "${model_choices[@]}"; do
