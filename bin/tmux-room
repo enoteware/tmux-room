@@ -87,6 +87,7 @@ Open options (--open / --launch):
   --fresh                         Create a new room if client-agent already exists
   --no-attach                     Create the room and stay detached
   --no-start                      Do not send /start (default for --open is send)
+  --list-clients                  Print the client menu and exit
 
 Client registry:
   ~/.config/tmux-room/clients     Optional slug /path lines
@@ -1825,6 +1826,7 @@ try:
             names[client_id] = {
                 "name": clean(row.get("name") or ""),
                 "short": clean(row.get("short_name") or ""),
+                "favorite": bool(row.get("is_favorite")),
             }
 except (OSError, ValueError, json.JSONDecodeError):
     pass
@@ -1900,12 +1902,13 @@ def label_for(key, slug):
     if key.isdigit() and key in names:
         short = names[key]["short"]
         name = names[key]["name"]
+        star = "* " if names[key].get("favorite") else ""
         extra = short if short and short.lower() != name.lower() else ""
         if extra:
-            return "%s  %s  %s" % (key, extra, name)
+            return "%s%s  %s  %s" % (star, key, extra, name)
         if name:
-            return "%s  %s" % (key, name)
-        return key
+            return "%s%s  %s" % (star, key, name)
+        return "%s%s" % (star, key)
     if key.isdigit():
         return "%s  %s" % (key, slug)
     return slug
@@ -1917,9 +1920,12 @@ for repo in repos:
 
 def sort_key(item):
     key, _rows = item
+    favorite = 1
+    if key.isdigit() and key in names and names[key].get("favorite"):
+        favorite = 0
     if key.isdigit():
-        return (0, int(key), key)
-    return (1, 0, key.lower())
+        return (favorite, 0, int(key), key)
+    return (1, 1, 0, key.lower())
 
 for key, rows in sorted(groups.items(), key=sort_key):
     print("C\t%s\t%s" % (key, label_for(key, rows[0]["slug"])))
@@ -2109,7 +2115,7 @@ next_fresh_room_name() {
 }
 
 open_launch_wizard() {
-  local client="" agent="" model="" cwd="" fresh=0 no_attach=0 start=1
+  local client="" agent="" model="" cwd="" fresh=0 no_attach=0 start=1 list_clients=0
   local room path default_client default_agent default_model default_client_key default_label i
   local last_saved_agent last_saved_model model_default_ok models_text pick_rc agent_default_ok
   local -a agent_choices model_choices create_args repo_choices
@@ -2147,6 +2153,7 @@ open_launch_wizard() {
       --no-attach) no_attach=1; shift ;;
       --no-start) start=0; shift ;;
       --start) start=1; shift ;;
+      --list-clients) list_clients=1; shift ;;
       *) echo "Unknown open option: $1" >&2; return 2 ;;
     esac
   done
@@ -2156,6 +2163,17 @@ open_launch_wizard() {
   default_client_key=$(launch_pref_get last_client_id || true)
   [[ -n "$default_client_key" ]] || default_client_key="$default_client"
   sort_client_menu "$default_client_key"
+
+  if ((list_clients == 1)); then
+    if ((${#client_menu_keys[@]} == 0)); then
+      echo "No clients found."
+      return 0
+    fi
+    for i in "${!client_menu_keys[@]}"; do
+      printf '%s\t%s\n' "${client_menu_keys[i]}" "${client_menu_labels[i]}"
+    done
+    return 0
+  fi
 
   if [[ -z "$client" ]]; then
     if ((${#client_menu_keys[@]} == 0)); then

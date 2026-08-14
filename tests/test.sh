@@ -83,6 +83,7 @@ assert_contains "$help" "--metadata"
 assert_contains "$help" "--cleanup-stale"
 assert_contains "$help" "--open"
 assert_contains "$help" "--model"
+assert_contains "$help" "--list-clients"
 
 MOCK=$(mktemp -d)
 trap '[[ -z "${REAL_TMUX_SOCKET:-}" ]] || "${REAL_TMUX_BIN:-tmux}" -L "$REAL_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true; rm -rf "$MOCK"' EXIT
@@ -927,9 +928,21 @@ unsafe_model_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_
 assert_contains "$unsafe_model_output" "Invalid model id"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
 
-mkdir -p "$MOCK/code/acme/.git" "$MOCK/code/acme-task-99" "$MOCK/code/cal_strat"
+mkdir -p "$MOCK/code/acme/.git" "$MOCK/code/acme-task-99" "$MOCK/code/cal_strat" "$MOCK/code/almondos"
 printf 'gitdir: %s\n' "$MOCK/code/acme/.git" > "$MOCK/code/acme-task-99/.git"
 printf 'INVOI_CLIENT_ID=128\n' > "$MOCK/code/cal_strat/.env.local"
+printf 'INVOI_CLIENT_ID=226\n' > "$MOCK/code/almondos/.env.local"
+cat > "$MOCK/invoi" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "clients" && "$2" == "list" ]]; then
+  cat <<'JSON'
+{"clients":[{"id":128,"name":"California Strategies","short_name":"CS","is_favorite":false},{"id":226,"name":"Almondos California Co.","short_name":"ACC","is_favorite":true}]}
+JSON
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$MOCK/invoi"
 cat > "$MOCK/grok" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -954,6 +967,14 @@ open_worktree=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_S
   "$SCRIPT" --open --client acme-task-99 --agent grok --model grok-4.6 --no-attach 2>&1 || true)
 assert_contains "$open_worktree" "Unknown client: acme-task-99"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+
+rm -f "$TMUX_ROOM_CONFIG_DIR/launch"
+listed=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --list-clients)
+assert_contains "$listed" "* 226  ACC  Almondos California Co."
+assert_contains "$listed" "128  CS  California Strategies"
+assert_before "$listed" "226" "128"
+assert_before "$listed" "128" "acme"
 
 : > "$TMUX_LOG"
 open_by_id=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
