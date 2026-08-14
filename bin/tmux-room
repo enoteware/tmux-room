@@ -1838,7 +1838,7 @@ if clients_file.is_file():
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
-            parts = line.split()
+            parts = line.split(None, 2)
             pin_id = ""
             if len(parts) == 2:
                 slug, path = parts
@@ -1848,8 +1848,7 @@ if clients_file.is_file():
                 continue
             path_obj = Path(path)
             if slug_re.match(slug) and path_obj.is_dir() and not is_worktree(path_obj):
-                client_id = read_env_client_id(path_obj) or pin_id
-                overrides.append((slug, str(path_obj.resolve()), client_id))
+                overrides.append((slug, str(path_obj.resolve()), pin_id or read_env_client_id(path_obj)))
     except OSError:
         pass
 
@@ -2021,7 +2020,7 @@ sort_client_menu() {
 }
 
 menu_pick() {
-  local title="$1" default="$2" i reply matches match default_ok
+  local title="$1" default="$2" i reply matches match default_ok item_key
   shift 2
   local -a items=("$@")
   menu_choice=""
@@ -2076,8 +2075,6 @@ menu_pick() {
       menu_choice="${items[$((reply - 1))]}"
       return 0
     fi
-    echo "Invalid choice." >&2
-    return 1
   fi
   for i in "${!items[@]}"; do
     if [[ "${items[i]}" == "$reply" ]]; then
@@ -2088,10 +2085,20 @@ menu_pick() {
   matches=0
   match=""
   for i in "${!items[@]}"; do
+    item_key="${items[i]}"
+    item_key="${item_key#\* }"
     case "${items[i]}" in
       "$reply"*)
         matches=$((matches + 1))
         match="${items[i]}"
+        ;;
+      *)
+        case "$item_key" in
+          "$reply"*)
+            matches=$((matches + 1))
+            match="${items[i]}"
+            ;;
+        esac
         ;;
     esac
   done
@@ -2226,8 +2233,13 @@ open_launch_wizard() {
     done
   fi
   if ! resolve_open_client "$client"; then
-    echo "Unknown client: $(sanitize_text "$client")" >&2
-    return 2
+    if [[ -n "$cwd" ]] && valid_client_slug "$client"; then
+      resolved_client="$client"
+      resolved_client_id=""
+    else
+      echo "Unknown client: $(sanitize_text "$client")" >&2
+      return 2
+    fi
   fi
   client="$resolved_client"
   valid_client_slug "$client" || { echo "Invalid client slug." >&2; return 2; }

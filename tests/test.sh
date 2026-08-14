@@ -976,6 +976,17 @@ assert_contains "$listed" "128  CS  California Strategies"
 assert_before "$listed" "226" "128"
 assert_before "$listed" "128" "acme"
 
+mkdir -p "$MOCK/pinned/fromid"
+FROMID_REAL=$(cd "$MOCK/pinned/fromid" && pwd -P)
+printf '999 fromid %s\n' "$FROMID_REAL" > "$TMUX_ROOM_CONFIG_DIR/clients"
+: > "$TMUX_LOG"
+open_pin_id=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client 999 --agent grok --model grok-4.6 --no-attach)
+assert_contains "$open_pin_id" "Created room: fromid-grok (\$3)"
+assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s fromid-grok -c $FROMID_REAL"
+printf 'acme-grok\n' > "$TMUX_STATE/new-room"
+
 : > "$TMUX_LOG"
 open_by_id=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
   TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
