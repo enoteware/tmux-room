@@ -67,6 +67,7 @@ export PATH="$HOME/bin:$PATH"
 
 ```bash
 tmux-room                 # compact picker; selection reveals details before attach
+tmux-room --open          # menu: client, agent, model; create, /start, attach
 tmux-room --list          # compact one-row-per-room table
 tmux-room --fleet         # searchable local and SSH-device picker
 tmux-room --fleet-json    # versioned aggregate fleet document
@@ -256,9 +257,35 @@ Add an allowlisted agent when desired:
 
 ```bash
 tmux-room --new kh-review --cwd /code/knowledge-hub --agent codex --state running
+tmux-room --new kh-review --cwd /code/knowledge-hub --agent grok --model grok-4.6 --start
 ```
 
-Allowed agent names are `claude`, `codex`, `grok`, `gemini`, `cursor`, and `hermes`. The command must exist on `PATH`. Arbitrary shell command text is not accepted. When `--agent` is omitted, tmux starts the user's normal shell. When `--driver` is omitted, an explicit `--agent` also becomes the public driver value.
+Allowed agent names are `claude`, `codex`, `grok`, `gemini`, `cursor`, and `hermes`. The command must exist on `PATH`. Arbitrary shell command text is not accepted. `--model` only accepts a token of letters, numbers, dots, underscores, colons, slashes, or hyphens. `--start` sends the hardcoded `/start` prompt. It does not accept custom prompt text. When `--agent` is omitted, tmux starts the user's normal shell. When `--driver` is omitted, an explicit `--agent` also becomes the public driver value.
+
+## Launch wizard
+
+`tmux-room --open` (also `--launch`) asks three questions, then creates the room and attaches:
+
+1. Client
+2. Agent (`claude`, `codex`, `grok`, and the others on PATH)
+3. Model for that agent
+
+Enter accepts the last choice for that client. The room name is `{client}-{agent}`. If that room already exists, tmux-room attaches it. `--fresh` makes `{client}-{agent}-2` instead.
+
+Clients come from `~/code` git folders and optional lines in `~/.config/tmux-room/clients`:
+
+```text
+regably /home/elliot/code/regably
+invoi /home/elliot/code/invoi
+```
+
+Last client, last agent, and per-client defaults are stored in `~/.config/tmux-room/launch`. `--open` sends `/start` so Claude runs the session-start workflow. Other agents get the same first prompt.
+
+Skip the menus when you already know the answers:
+
+```bash
+tmux-room --open --client regably --agent grok --model grok-4.6
+```
 
 New and renamed rooms must start with a letter or number, followed only by letters, numbers, underscores, or hyphens. Periods are excluded because current tmux releases can rewrite them in session names. This keeps room references unambiguous across tmux-room, SSH, macOS, and web clients.
 

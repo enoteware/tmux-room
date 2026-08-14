@@ -70,7 +70,7 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 
 bash -n "$SCRIPT"
 bash -n "$ROOT/install.sh"
-[[ "$($SCRIPT --version)" == "tmux-room 0.4.1" ]] || fail "version should be 0.4.1"
+[[ "$($SCRIPT --version)" == "tmux-room 0.5.0" ]] || fail "version should be 0.5.0"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"
@@ -81,6 +81,8 @@ assert_contains "$help" "--json"
 assert_contains "$help" "--inspect"
 assert_contains "$help" "--metadata"
 assert_contains "$help" "--cleanup-stale"
+assert_contains "$help" "--open"
+assert_contains "$help" "--model"
 
 MOCK=$(mktemp -d)
 trap '[[ -z "${REAL_TMUX_SOCKET:-}" ]] || "${REAL_TMUX_BIN:-tmux}" -L "$REAL_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true; rm -rf "$MOCK"' EXIT
@@ -481,7 +483,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'TMUX_ROOM_VERSION="broken"' '(' > "$INVALID
 cp "$SCRIPT" "$UPDATE_DIR/invalid-copy"
 invalid_update_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" "$UPDATE_DIR/invalid-copy" --update 2>&1 || true)
 assert_contains "$invalid_update_output" "syntax error"
-[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.4.1" ]] || fail "invalid update replaced the installed copy"
+[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.5.0" ]] || fail "invalid update replaced the installed copy"
 
 invalid_install_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" 2>&1 || true)
@@ -493,11 +495,11 @@ MISSING_VERSION="$UPDATE_DIR/missing-version"
 printf '%s\n' '#!/usr/bin/env bash' 'echo missing' > "$MISSING_VERSION"
 cp "$SCRIPT" "$UPDATE_DIR/missing-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$MISSING_VERSION" "$UPDATE_DIR/missing-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.4.1" ]] || fail "versionless update replaced the installed copy"
+[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.5.0" ]] || fail "versionless update replaced the installed copy"
 
 cp "$SCRIPT" "$UPDATE_DIR/download-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 "$UPDATE_DIR/download-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.4.1" ]] || fail "failed download replaced the installed copy"
+[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.5.0" ]] || fail "failed download replaced the installed copy"
 
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" >/dev/null 2>&1 || true
@@ -513,7 +515,9 @@ assert_contains "$symlink_update_output" "symbolic-link installations are not re
 output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
 assert_contains "$output" "DEVICE: devbox [local]"
 assert_contains "$output" "STATUS: CPU 12% load (0.96/8) · RAM 44% (13.9/31.3 GB)"
-assert_contains "$output" "#  P ROOM"
+assert_contains "$output" "#  P SERVER"
+assert_contains "$output" "ROOM"
+assert_contains "$output" "MODEL"
 assert_contains "$output" "ATTENTION"
 assert_contains "$output" "claude-fable5-low"
 assert_contains "$output" "alpha"
@@ -524,13 +528,13 @@ assert_not_contains "$output" "REPO:"
 assert_not_contains "$output" "SUMMED RSS SNAPSHOT:"
 
 narrow_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=50 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
-assert_contains "$narrow_output" "#  ROOM  ATTENTION"
+assert_contains "$narrow_output" "#  SERVER  ROOM  ATTENTION"
 assert_contains "$narrow_output" "alpha"
 assert_max_display_width "$narrow_output" 50
 
 medium_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=80 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
 assert_contains "$medium_output" "ATTENTION"
-assert_contains "$medium_output" "DRIVER"
+assert_contains "$medium_output" "MODEL"
 assert_max_display_width "$medium_output" 80
 
 wide_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_COLUMNS=120 TMUX_ROOM_DEVICE=devbox "$SCRIPT" --list)
@@ -659,7 +663,7 @@ unknown_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --js
 printf '%s' "$unknown_json" | /usr/bin/python3 -c '
 import json, sys
 metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
-assert metadata["driver"] == "unknown"
+assert metadata["driver"] == "claude-fable5-low"
 assert metadata["state"] == "unknown"
 assert metadata["state_updated_at"] is None
 assert metadata["state_age_seconds"] is None
@@ -904,6 +908,66 @@ assert_contains "$invalid_agent_output" "Unsupported agent"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
 
 : > "$TMUX_LOG"
+new_model_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox \
+  "$SCRIPT" --new gamma --cwd "$MOCK/workspace" --agent codex --model gpt-5.4 --start)
+assert_contains "$new_model_output" "Created room: gamma (\$3)"
+assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s gamma -c $WORKSPACE_REAL codex --model gpt-5.4 /start"
+rm -f "$TMUX_STATE/new-room"
+
+: > "$TMUX_LOG"
+model_without_agent=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox \
+  "$SCRIPT" --new gamma --model gpt-5.4 2>&1 || true)
+assert_contains "$model_without_agent" "--model requires --agent"
+assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+
+: > "$TMUX_LOG"
+unsafe_model_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox \
+  "$SCRIPT" --new gamma --agent codex --model 'gpt-5.4;whoami' 2>&1 || true)
+assert_contains "$unsafe_model_output" "Invalid model id"
+assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+
+mkdir -p "$MOCK/code/acme/.git"
+cat > "$MOCK/grok" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$MOCK/grok"
+
+: > "$TMUX_LOG"
+open_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client acme --agent grok --model grok-4.6 --no-attach)
+assert_contains "$open_output" "Created room: acme-grok (\$3)"
+assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s acme-grok"
+assert_contains "$(<"$TMUX_LOG")" "grok --model grok-4.6 /start"
+[[ -f "$TMUX_ROOM_CONFIG_DIR/launch" ]] || fail "open should write launch prefs"
+assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "last_client=acme"
+assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "pref.acme.agent=grok"
+assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "pref.acme.model=grok-4.6"
+
+: > "$TMUX_LOG"
+open_again=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client acme --agent grok --no-attach)
+assert_contains "$open_again" "Room already exists: acme-grok"
+assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+
+: > "$TMUX_LOG"
+open_fresh=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client acme --agent grok --fresh --no-attach)
+assert_contains "$open_fresh" "Created room: acme-grok-2 (\$3)"
+assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s acme-grok-2"
+rm -f "$TMUX_STATE/new-room"
+
+: > "$TMUX_LOG"
+open_no_tty=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open 2>&1 || true)
+assert_contains "$open_no_tty" "Usage: tmux-room --open"
+assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+
+: > "$TMUX_LOG"
 arbitrary_command_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --new gamma --command whoami 2>&1 || true)
 assert_contains "$arbitrary_command_output" "Unknown room creation option: --command"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
@@ -1073,12 +1137,13 @@ printf '%s' "$fleet_alias" | /usr/bin/python3 -c 'import json,sys; document=json
 
 fleet_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=72 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
 assert_contains "$fleet_output" "FLEET: 8 devices, 2 reachable, 6 unavailable"
-assert_contains "$fleet_output" "mini:remote-review"
+assert_contains "$fleet_output" "🍎 mini"
+assert_contains "$fleet_output" "remote-review"
 assert_contains "$fleet_output" "!needs_input"
 assert_contains "$fleet_output" "! down: unreachable"
 assert_not_contains "$fleet_output" "mini-host"
 assert_not_contains "$fleet_output" "must-not-leak"
-assert_before "$fleet_output" "mini:remote-review" "devbox:alpha"
+assert_before "$fleet_output" "remote-review" "alpha"
 assert_max_display_width "$fleet_output" 72
 assert_not_contains "$fleet_output" "0|0|1"
 
@@ -1088,6 +1153,14 @@ local_fleet_picker_output=$(printf '/alpha\n\nn\nq' | PATH="$MOCK:/usr/bin:/bin"
 assert_contains "$local_fleet_picker_output" "ROOM DETAILS"
 assert_contains "$local_fleet_picker_output" "Attachment cancelled"
 assert_not_contains "$local_fleet_picker_output" "display-only"
+
+: > "$TMUX_LOG"
+local_fleet_switch_output=$(printf '/alpha\n\ny\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" \
+  TMUX='/tmp/tmux-test/default,1,0' TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
+assert_contains "$(<"$TMUX_LOG")" "switch-client -t $MOCK_ID_1"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session -t $MOCK_ID_1"
+assert_contains "$local_fleet_switch_output" "FLEET:"
 
 narrow_fleet_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=34 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
 for unavailable_device in down badjson tainted hugeint large error; do
@@ -1131,10 +1204,12 @@ assert_not_contains "$mixed_lookup_picker" "Device is no longer configured"
 assert_contains "$(<"$SSH_LOG")" "/usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --inspect-id 9 remote-review"
 
 : > "$SSH_LOG"
-printf '/remote-review\n\ny\n' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
+fleet_attach_return_output=$(printf '/remote-review\n\ny\nq' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
   TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
-  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet >/dev/null
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
 assert_contains "$(<"$SSH_LOG")" "-t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --attach-id 9 remote-review"
+fleet_screen_count=$(printf '%s' "$fleet_attach_return_output" | /usr/bin/python3 -c 'import sys; text=sys.stdin.read(); marker="Attaching to remote-review on mini."; print(text.split(marker,1)[1].count("FLEET:") if marker in text else 0)')
+((fleet_screen_count >= 1)) || fail "fleet picker did not return after attached room exited"
 
 : > "$TMUX_LOG"
 protected_kill_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_META_PROTECTED="${ESC}1${BIDI}" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)

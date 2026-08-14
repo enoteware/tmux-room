@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.4.1"
+TMUX_ROOM_VERSION="0.5.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
@@ -26,7 +26,7 @@ usage() {
 tmux-room: device-aware tmux agent room picker
 
 Usage:
-  tmux-room                       Arrow-key picker (Enter inspect, x close, q quit)
+  tmux-room                       Fleet picker across local + configured devices
   tmux-room <name>                Attach to a local room
   tmux-room device:room           Attach to a room on a configured device
   tmux-room --list                Show compact local room table
@@ -39,6 +39,8 @@ Usage:
   tmux-room --inspect <room>      Inspect a local room without attaching
   tmux-room --inspect device:room Inspect a remote room without attaching
   tmux-room --new <room> [opts]   Create a detached room with optional metadata
+  tmux-room --open                Menu: client, agent, model; create and attach
+  tmux-room --launch              Alias for --open
   tmux-room --rename <old> <new>  Rename a room using its immutable ID
   tmux-room --metadata <room> ... Update public room metadata
   tmux-room --cleanup-stale       Review and confirm stale detached room cleanup
@@ -74,6 +76,22 @@ Workspace options for --new:
   --cwd <existing-directory>      Start the room in this directory
   --agent <name>                  Start claude, codex, grok, gemini, cursor,
                                   or hermes without accepting shell commands
+  --model <id>                    Pass an allowlisted model id to --agent
+  --start                         Send the hardcoded /start prompt after boot
+
+Open options (--open / --launch):
+  --client <slug>                 Skip the client menu
+  --agent <name>                  Skip the agent menu
+  --model <id>                    Skip the model menu
+  --cwd <existing-directory>      Override the client working directory
+  --fresh                         Create a new room if client-agent already exists
+  --no-attach                     Create the room and stay detached
+  --no-start                      Do not send /start (default for --open is send)
+
+Client registry:
+  ~/.config/tmux-room/clients     Optional slug /path lines
+  ~/.config/tmux-room/launch      Last client, agent, and per-client defaults
+  TMUX_ROOM_CODE_DIR              Extra git folders to offer (default: ~/code)
 
 Cleanup options:
   --days <count>                  Minimum inactive age (default: 7)
@@ -669,7 +687,7 @@ load_compact_agent_inventory() {
   local pane_rows session_id label
   compact_agent_ids=()
   compact_agent_labels=()
-  pane_rows=$(tmux list-panes -a -F '#{session_id}|#{pane_pid}|#{pane_current_command}|#{pane_title}' 2>/dev/null || true)
+  pane_rows=$(tmux list-panes -a -F '#{session_id}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_title}' 2>/dev/null || true)
   while IFS=$'\t' read -r session_id label; do
     [[ -z "$session_id" ]] && continue
     compact_agent_ids+=("$session_id")
@@ -681,15 +699,15 @@ import subprocess
 
 panes = {}
 for line in os.environ.get('TMUX_ROOM_PANE_ROWS', '').splitlines():
-    parts = line.split('|', 3)
-    if len(parts) != 4:
+    parts = line.split('|', 4)
+    if len(parts) != 5:
         continue
-    sid, raw_pid, command, title = parts
+    sid, pane_id, raw_pid, command, title = parts
     try:
         pid = int(raw_pid)
     except ValueError:
         continue
-    panes.setdefault(sid, []).append((pid, f'{command} {title}'))
+    panes.setdefault(sid, []).append((pane_id, pid, f'{command} {title}'))
 
 ps_rows = []
 result = subprocess.run(['ps', '-eo', 'pid=,ppid=,args='], capture_output=True, text=True, check=False)
@@ -729,16 +747,37 @@ def field(args, patterns, default):
     return default
 
 def label(args, provider):
-    model = field(args, [r'(?:--model|-m)[=\s]+([A-Za-z0-9._:/-]+)', r'\b(?!claude-code\b)((?:gpt|claude|grok|gemini|fable)-?[A-Za-z0-9._-]+)\b'], 'unknown')
-    effort = field(args, [r'--effort[=\s]+([A-Za-z0-9._-]+)', r'(?:model_reasoning_effort|reasoning_effort)[=\s]+["\x27]?([A-Za-z0-9._-]+)'], 'unknown')
+    model = field(args, [
+        r'(?:--model|-m)[=\s]+([A-Za-z0-9._:/-]+)',
+        r'\b((?:gpt|grok|gemini|fable)-[A-Za-z0-9._-]+)\b',
+        r'\b(claude-(?:opus|sonnet|haiku|\d)[A-Za-z0-9._-]*)\b',
+    ], 'unknown')
     if model.startswith('claude-'):
         model = model[len('claude-'):]
-    model = model.replace('-', '')
-    return '-'.join(part for part in (provider, model, effort) if part != 'unknown') or 'none'
+    return model if model != 'unknown' else provider.title()
+
+def pane_model(pane_id, provider):
+    text = subprocess.run(
+        ['tmux', 'capture-pane', '-p', '-t', pane_id, '-S', '-40'],
+        capture_output=True, text=True, check=False
+    ).stdout
+    patterns = [
+        r'\b(gpt-[A-Za-z0-9._-]+)\b',
+        r'\b(Grok\s+\d+(?:\.\d+)?)\b',
+        r'\b(Claude\s+(?:Opus|Sonnet|Haiku)[A-Za-z0-9 ._-]*)\b',
+        r'\b(gemini-[A-Za-z0-9._-]+)\b',
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.I)
+        if matches:
+            return matches[-1].strip()
+    return provider.title()
 
 for sid, pane_items in panes.items():
     found = None
-    queue = [pid for pid, _ in pane_items]
+    found_provider = None
+    found_pane = None
+    queue = [pid for _, pid, _ in pane_items]
     seen = set()
     while queue and not found:
         pid = queue.pop(0)
@@ -749,14 +788,20 @@ for sid, pane_items in panes.items():
         provider = identify(args)
         if provider:
             found = label(args, provider)
+            found_provider = provider
+            found_pane = next((pane_id for pane_id, root_pid, _ in pane_items if root_pid in seen), pane_items[0][0])
             break
         queue.extend(children.get(pid, []))
     if not found:
-        for _, hint in pane_items:
+        for pane_id, _, hint in pane_items:
             provider = identify(hint)
             if provider:
                 found = label(hint, provider)
+                found_provider = provider
+                found_pane = pane_id
                 break
+    if found_provider and (not found or found == found_provider.title()):
+        found = pane_model(found_pane or pane_items[0][0], found_provider)
     print(f'{sid}\t{found or "none"}')
 PY
   )
@@ -983,16 +1028,12 @@ render_view_table() {
     fi
     for i in "${!view_order[@]}"; do
       index="${view_order[i]}"
-      if [[ "$mode" == "fleet" ]]; then
-        target="${view_devices[index]}:${view_names[index]}"
-      else
-        target="${view_names[index]}"
-      fi
+      target="${view_names[index]}"
       selected_flag=0
       [[ "$i" == "$selected" ]] && selected_flag=1
-      printf 'R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf 'R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$((i + 1))" "$selected_flag" \
-        "${view_pinned[index]}" "$target" "${view_drivers[index]}" "${view_states[index]}" \
+        "${view_pinned[index]}" "${view_devices[index]}" "$target" "${view_drivers[index]}" "${view_states[index]}" \
         "${view_windows[index]}" "${view_activity[index]}" "${view_notes[index]}"
     done
   } | TMUX_ROOM_RENDER_WIDTH="$width" TMUX_ROOM_RENDER_HEADER="$header" \
@@ -1064,9 +1105,9 @@ for raw in sys.stdin:
     if len(fields) == 3 and fields[0] == "S":
         statuses.append((clean(fields[1]), clean(fields[2])))
         continue
-    if len(fields) != 10 or fields[0] != "R":
+    if len(fields) != 11 or fields[0] != "R":
         continue
-    _, number, selected, pinned, target, driver, state, windows, activity, note = fields
+    _, number, selected, pinned, device, target, driver, state, windows, activity, note = fields
     try:
         stamp = int(activity)
     except ValueError:
@@ -1080,7 +1121,15 @@ for raw in sys.stdin:
         active = datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M") if stamp else "unknown"
     except (OverflowError, OSError, ValueError):
         active = "unknown"
-    rows.append((number, selected == "1", pin, clean(target), clean(driver), clean(state), clean(windows), active, clean(note)))
+    rows.append((number, selected == "1", pin, clean(device), clean(target), clean(driver), clean(state), clean(windows), active, clean(note)))
+
+def server_label(device):
+    low = device.casefold()
+    if low in ("devbox", "note-devbox"):
+        return "🟩 dev"
+    if low in ("mac-mini", "mini", "elliots-mac-mini"):
+        return "🍎 mini"
+    return "🖥 " + device
 
 if statuses:
     for device, status in statuses:
@@ -1088,47 +1137,50 @@ if statuses:
     line()
 
 if width < 64:
-    line("#  ROOM  ATTENTION")
-    for number, selected, pin, target, driver, state, windows, active, note in rows:
+    line("#  SERVER  ROOM  ATTENTION")
+    for number, selected, pin, device, target, driver, state, windows, active, note in rows:
         prefix = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " "
+        server_w = 8
         state_w = min(12, max(7, width // 3))
-        target_w = max(1, width - cell_width(prefix) - state_w - 1)
-        rendered = prefix + pad(target, target_w) + " " + clip(state, state_w)
+        target_w = max(1, width - cell_width(prefix) - server_w - state_w - 3)
+        rendered = prefix + pad(server_label(device), server_w) + " " + pad(target, target_w) + " " + clip(state, state_w)
         rendered = clip(rendered, width)
         print(("\033[7m" + rendered + "\033[0m") if selected else rendered)
 elif width < 110:
     active_w = 8
+    server_w = 8
     state_w = 13
     driver_w = 14 if width >= 78 else 0
-    fixed = 6 + state_w + active_w + (driver_w + 1 if driver_w else 0) + 3
+    fixed = 6 + server_w + state_w + active_w + (driver_w + 1 if driver_w else 0) + 4
     target_w = max(12, width - fixed)
-    heading = "#  P " + pad("ROOM" if mode == "local" else "DEVICE:ROOM", target_w) + " " + pad("ATTENTION", state_w)
+    heading = "#  P " + pad("SERVER", server_w) + " " + pad("ROOM", target_w) + " " + pad("ATTENTION", state_w)
     if driver_w:
-        heading += " " + pad("DRIVER", driver_w)
+        heading += " " + pad("MODEL", driver_w)
     heading += " " + pad("ACTIVE", active_w)
     line(heading)
-    for number, selected, pin, target, driver, state, windows, active, note in rows:
-        rendered = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " " + pad(target, target_w) + " " + pad(state, state_w)
+    for number, selected, pin, device, target, driver, state, windows, active, note in rows:
+        rendered = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " " + pad(server_label(device), server_w) + " " + pad(target, target_w) + " " + pad(state, state_w)
         if driver_w:
             rendered += " " + pad(driver, driver_w)
         rendered += " " + clip(active[5:16], active_w)
         rendered = clip(rendered, width)
         print(("\033[7m" + rendered + "\033[0m") if selected else rendered)
 else:
+    server_w = 8
     state_w = 13
-    driver_w = 20
+    driver_w = 18
     windows_w = 3
     active_w = 16
-    fixed = 6 + state_w + driver_w + windows_w + active_w + 6
-    flexible = max(30, width - fixed)
-    target_w = min(34, max(22, flexible * 2 // 3))
+    fixed = 6 + server_w + state_w + driver_w + windows_w + active_w + 7
+    flexible = max(24, width - fixed)
+    target_w = min(32, max(18, flexible * 2 // 3))
     note_w = max(0, width - fixed - target_w)
-    heading = "#  P " + pad("ROOM" if mode == "local" else "DEVICE:ROOM", target_w) + " " + pad("DRIVER", driver_w) + " " + pad("ATTENTION", state_w) + " " + pad("WIN", windows_w) + " " + pad("LAST ACTIVE", active_w)
+    heading = "#  P " + pad("SERVER", server_w) + " " + pad("ROOM", target_w) + " " + pad("MODEL", driver_w) + " " + pad("ATTENTION", state_w) + " " + pad("WIN", windows_w) + " " + pad("LAST ACTIVE", active_w)
     if note_w:
         heading += " " + pad("NOTE", note_w)
     line(heading)
-    for number, selected, pin, target, driver, state, windows, active, note in rows:
-        rendered = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " " + pad(target, target_w) + " " + pad(driver, driver_w) + " " + pad(state, state_w) + " " + pad(windows, windows_w) + " " + pad(active, active_w)
+    for number, selected, pin, device, target, driver, state, windows, active, note in rows:
+        rendered = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " " + pad(server_label(device), server_w) + " " + pad(target, target_w) + " " + pad(driver, driver_w) + " " + pad(state, state_w) + " " + pad(windows, windows_w) + " " + pad(active, active_w)
         if note_w:
             rendered += " " + clip(note, note_w)
         rendered = clip(rendered, width)
@@ -1198,7 +1250,7 @@ inspect_local_room() {
 
 print_json_inventory() {
   local wanted="${1:-}" source_label="${TMUX_ROOM_SOURCE_LABEL:-local}"
-  local name windows attached created activity session_id first_path first i
+  local name windows attached created activity session_id first_path first i effective_driver
 
   if [[ -n "$wanted" ]]; then
     valid_local_room_name "$wanted" || { echo "Invalid room name." >&2; return 2; }
@@ -1209,6 +1261,7 @@ print_json_inventory() {
   else
     load_rows
   fi
+  load_compact_agent_inventory
 
   TMUX_ROOM_JSON_SCHEMA="$TMUX_ROOM_SCHEMA" \
   TMUX_ROOM_JSON_SCHEMA_VERSION="$TMUX_ROOM_SCHEMA_VERSION" \
@@ -1246,6 +1299,11 @@ PY
     fi
     first_path=$(sanitize_text "$first_path")
     metadata_load "$session_id"
+    effective_driver="$metadata_driver"
+    if [[ "$effective_driver" == "unknown" || -z "$effective_driver" ]]; then
+      effective_driver=$(compact_agent_label "$session_id")
+      [[ "$effective_driver" == "none" || -z "$effective_driver" ]] && effective_driver="unknown"
+    fi
     ((first == 1)) || printf ','
     first=0
     TMUX_ROOM_JSON_ID="$session_id" \
@@ -1255,7 +1313,7 @@ PY
     TMUX_ROOM_JSON_CREATED="$created" \
     TMUX_ROOM_JSON_ACTIVITY="$activity" \
     TMUX_ROOM_JSON_PATH="$first_path" \
-    TMUX_ROOM_JSON_DRIVER="$metadata_driver" \
+    TMUX_ROOM_JSON_DRIVER="$effective_driver" \
     TMUX_ROOM_JSON_STATE="$metadata_state" \
     TMUX_ROOM_JSON_STATE_UPDATED_AT="$metadata_state_updated_at" \
     TMUX_ROOM_JSON_STATE_AGE_SECONDS="$metadata_state_age_seconds" \
@@ -1604,12 +1662,432 @@ apply_parsed_metadata() {
   return 1
 }
 
+valid_agent_name() {
+  case "$1" in claude|codex|grok|gemini|cursor|hermes) return 0 ;; *) return 1 ;; esac
+}
+
+valid_model_id() {
+  valid_metadata_token "$1"
+}
+
+valid_client_slug() {
+  valid_portable_room_name "$1"
+}
+
+resolve_agent_bin() {
+  case "$1" in
+    cursor)
+      if command -v cursor >/dev/null 2>&1; then
+        printf 'cursor'
+        return 0
+      fi
+      if command -v cursor-agent >/dev/null 2>&1; then
+        printf 'cursor-agent'
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      command -v "$1" >/dev/null 2>&1 || return 1
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
+build_agent_argv() {
+  local agent="$1" model="$2" start="$3" bin
+  agent_argv=()
+  bin=$(resolve_agent_bin "$agent") || return 127
+  agent_argv=("$bin")
+  if [[ -n "$model" ]]; then
+    valid_model_id "$model" || return 2
+    case "$agent" in
+      hermes) agent_argv+=(-m "$model") ;;
+      *) agent_argv+=(--model "$model") ;;
+    esac
+  fi
+  if [[ "$start" == "1" ]]; then
+    case "$agent" in
+      gemini) agent_argv+=(-i "/start") ;;
+      hermes) ;;
+      *) agent_argv+=("/start") ;;
+    esac
+  fi
+  return 0
+}
+
+launch_pref_get() {
+  local key="$1" file="${TMUX_ROOM_LAUNCH_FILE:-$TMUX_ROOM_CONFIG_DIR/launch}" line
+  [[ "$key" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  [[ -f "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "$key="* ]] || continue
+    printf '%s' "${line#*=}"
+    return 0
+  done < "$file"
+  return 1
+}
+
+launch_pref_write() {
+  local file="${TMUX_ROOM_LAUNCH_FILE:-$TMUX_ROOM_CONFIG_DIR/launch}" tmp line key value
+  mkdir -p "$(dirname -- "$file")"
+  tmp="$file.tmp.$$"
+  {
+    [[ -f "$file" ]] && cat "$file"
+    printf '%s\n' "$@"
+  } | python3 -c '
+import sys
+vals = {}
+order = []
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if not key or any(ch in key for ch in " \t"):
+        continue
+    if key not in vals:
+        order.append(key)
+    vals[key] = value
+for key in order:
+    sys.stdout.write("%s=%s\n" % (key, vals[key]))
+' > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$file"
+}
+
+models_for_agent() {
+  case "$1" in
+    grok) printf '%s\n' grok-4.6 grok-4.5 ;;
+    claude) printf '%s\n' sonnet opus haiku fable ;;
+    codex) printf '%s\n' gpt-5.4 gpt-5.3 o3 ;;
+    cursor) printf '%s\n' sonnet-4 gpt-5 ;;
+    gemini) printf '%s\n' gemini-2.5-pro gemini-2.5-flash ;;
+    hermes) ;;
+    *) ;;
+  esac
+}
+
+add_client_entry() {
+  local slug="$1" path="$2" i
+  valid_client_slug "$slug" || return 1
+  [[ -d "$path" ]] || return 1
+  path=$(cd -- "$path" 2>/dev/null && pwd -P) || return 1
+  for i in "${!client_slugs[@]}"; do
+    if [[ "${client_slugs[i]}" == "$slug" ]]; then
+      client_paths[i]="$path"
+      return 0
+    fi
+  done
+  client_slugs+=("$slug")
+  client_paths+=("$path")
+}
+
+load_client_catalog() {
+  local code_dir="${TMUX_ROOM_CODE_DIR:-$HOME/code}"
+  local clients_file="${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients}"
+  local dir slug path line
+  client_slugs=()
+  client_paths=()
+  if [[ -f "$clients_file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      slug="${line%%[[:space:]]*}"
+      path="${line#"$slug"}"
+      path="${path#"${path%%[![:space:]]*}"}"
+      add_client_entry "$slug" "$path" || true
+    done < "$clients_file"
+  fi
+  if [[ -d "$code_dir" ]]; then
+    for dir in "$code_dir"/*; do
+      [[ -d "$dir" ]] || continue
+      [[ -d "$dir/.git" || -f "$dir/.git" ]] || continue
+      slug=$(basename -- "$dir")
+      add_client_entry "$slug" "$dir" || true
+    done
+  fi
+}
+
+client_path_for() {
+  local slug="$1" i
+  for i in "${!client_slugs[@]}"; do
+    if [[ "${client_slugs[i]}" == "$slug" ]]; then
+      printf '%s' "${client_paths[i]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+sort_client_slugs() {
+  local preferred="$1" i slug
+  local -a preferred_slugs other_slugs preferred_paths other_paths
+  preferred_slugs=()
+  other_slugs=()
+  preferred_paths=()
+  other_paths=()
+  for i in "${!client_slugs[@]}"; do
+    slug="${client_slugs[i]}"
+    if [[ "$slug" == "$preferred" ]]; then
+      preferred_slugs+=("$slug")
+      preferred_paths+=("${client_paths[i]}")
+    else
+      other_slugs+=("$slug")
+      other_paths+=("${client_paths[i]}")
+    fi
+  done
+  client_slugs=("${preferred_slugs[@]}" "${other_slugs[@]}")
+  client_paths=("${preferred_paths[@]}" "${other_paths[@]}")
+}
+
+menu_pick() {
+  local title="$1" default="$2" i reply matches match
+  shift 2
+  local -a items=("$@")
+  menu_choice=""
+  menu_raw_reply=""
+  ((${#items[@]} > 0)) || return 1
+  echo
+  echo "$title"
+  for i in "${!items[@]}"; do
+    if [[ -n "$default" && "${items[i]}" == "$default" ]]; then
+      printf '  %2d) %s  [last]\n' $((i + 1)) "${items[i]}"
+    else
+      printf '  %2d) %s\n' $((i + 1)) "${items[i]}"
+    fi
+  done
+  printf 'Choice [%s]: ' "${default:-${items[0]}}"
+  IFS= read -r reply || return 1
+  reply="${reply#"${reply%%[![:space:]]*}"}"
+  reply="${reply%"${reply##*[![:space:]]}"}"
+  menu_raw_reply="$reply"
+  if [[ -z "$reply" ]]; then
+    menu_choice="${default:-${items[0]}}"
+    return 0
+  fi
+  if [[ "$reply" =~ ^[0-9]+$ ]]; then
+    if ((reply >= 1 && reply <= ${#items[@]})); then
+      menu_choice="${items[$((reply - 1))]}"
+      return 0
+    fi
+    echo "Invalid choice." >&2
+    return 1
+  fi
+  for i in "${!items[@]}"; do
+    if [[ "${items[i]}" == "$reply" ]]; then
+      menu_choice="${items[i]}"
+      return 0
+    fi
+  done
+  matches=0
+  match=""
+  for i in "${!items[@]}"; do
+    case "${items[i]}" in
+      "$reply"*)
+        matches=$((matches + 1))
+        match="${items[i]}"
+        ;;
+    esac
+  done
+  if ((matches == 1)); then
+    menu_choice="$match"
+    return 0
+  fi
+  echo "Invalid choice." >&2
+  return 1
+}
+
+next_fresh_room_name() {
+  local base="$1" suffix=2
+  valid_portable_room_name "$base" || return 1
+  if ! find_room_row "$base"; then
+    printf '%s' "$base"
+    return 0
+  fi
+  while ((suffix <= 99)); do
+    if ! find_room_row "$base-$suffix"; then
+      printf '%s' "$base-$suffix"
+      return 0
+    fi
+    suffix=$((suffix + 1))
+  done
+  return 1
+}
+
+open_launch_wizard() {
+  local client="" agent="" model="" cwd="" fresh=0 no_attach=0 start=1
+  local room path default_client default_agent default_model
+  local -a agent_choices model_choices create_args
+  created_session_id=""
+  while (($# > 0)); do
+    case "$1" in
+      --client)
+        (($# >= 2)) || { echo "--client requires a value." >&2; return 2; }
+        valid_client_slug "$2" || { echo "Invalid client slug." >&2; return 2; }
+        client="$2"
+        shift 2
+        ;;
+      --agent)
+        (($# >= 2)) || { echo "--agent requires a value." >&2; return 2; }
+        valid_agent_name "$2" || { echo "Unsupported agent: $(sanitize_text "$2")" >&2; return 2; }
+        agent="$2"
+        shift 2
+        ;;
+      --model)
+        (($# >= 2)) || { echo "--model requires a value." >&2; return 2; }
+        valid_model_id "$2" || { echo "Invalid model id." >&2; return 2; }
+        model="$2"
+        shift 2
+        ;;
+      --cwd)
+        (($# >= 2)) || { echo "--cwd requires an existing directory." >&2; return 2; }
+        if ! valid_metadata_text "$2" || [[ ! -d "$2" ]]; then
+          echo "Directory not found or unsafe: $(sanitize_text "$2")" >&2
+          return 2
+        fi
+        cwd=$(cd -- "$2" 2>/dev/null && pwd -P) || { echo "Cannot access directory: $(sanitize_text "$2")" >&2; return 2; }
+        shift 2
+        ;;
+      --fresh) fresh=1; shift ;;
+      --no-attach) no_attach=1; shift ;;
+      --no-start) start=0; shift ;;
+      --start) start=1; shift ;;
+      *) echo "Unknown open option: $1" >&2; return 2 ;;
+    esac
+  done
+
+  load_client_catalog
+  default_client=$(launch_pref_get last_client || true)
+  sort_client_slugs "$default_client"
+
+  if [[ -z "$client" ]]; then
+    if ((${#client_slugs[@]} == 0)); then
+      echo "No clients found. Add slug /path lines to ${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients} or clone a repo into ${TMUX_ROOM_CODE_DIR:-$HOME/code}." >&2
+      return 1
+    fi
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      echo "Usage: tmux-room --open --client <slug> --agent <name> [--model <id>]" >&2
+      return 2
+    fi
+    while ! menu_pick "Client" "$default_client" "${client_slugs[@]}"; do :; done
+    client="$menu_choice"
+  fi
+  valid_client_slug "$client" || { echo "Invalid client slug." >&2; return 2; }
+
+  if [[ -z "$cwd" ]]; then
+    cwd=$(client_path_for "$client" || true)
+    if [[ -z "$cwd" ]]; then
+      if [[ -d "${TMUX_ROOM_CODE_DIR:-$HOME/code}/$client" ]]; then
+        cwd=$(cd -- "${TMUX_ROOM_CODE_DIR:-$HOME/code}/$client" 2>/dev/null && pwd -P) || true
+      fi
+    fi
+  fi
+  if [[ -z "$cwd" || ! -d "$cwd" ]]; then
+    echo "No working directory for client $client. Pass --cwd or add it to ${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients}." >&2
+    return 1
+  fi
+
+  default_agent=$(launch_pref_get "pref.$client.agent" || launch_pref_get last_agent || true)
+  if [[ -z "$agent" ]]; then
+    agent_choices=()
+    for agent in grok claude codex cursor gemini hermes; do
+      if resolve_agent_bin "$agent" >/dev/null 2>&1; then
+        agent_choices+=("$agent")
+      fi
+    done
+    agent=""
+    ((${#agent_choices[@]} > 0)) || { echo "No supported agent commands are on PATH." >&2; return 127; }
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      echo "Usage: tmux-room --open --client <slug> --agent <name> [--model <id>]" >&2
+      return 2
+    fi
+    [[ -n "$default_agent" ]] || default_agent="${agent_choices[0]}"
+    while ! menu_pick "Agent" "$default_agent" "${agent_choices[@]}"; do :; done
+    agent="$menu_choice"
+  fi
+  valid_agent_name "$agent" || { echo "Unsupported agent: $(sanitize_text "$agent")" >&2; return 2; }
+  resolve_agent_bin "$agent" >/dev/null 2>&1 || { echo "Agent command not found: $agent" >&2; return 127; }
+
+  default_model=$(launch_pref_get "pref.$client.model" || launch_pref_get last_model || true)
+  model_choices=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] && model_choices+=("$line")
+  done < <(models_for_agent "$agent")
+  if [[ -z "$model" ]]; then
+    if ((${#model_choices[@]} == 0)); then
+      model=""
+    elif [[ ! -t 0 || ! -t 1 ]]; then
+      if [[ -n "$default_model" ]]; then
+        model="$default_model"
+      else
+        model="${model_choices[0]}"
+      fi
+    else
+      [[ -n "$default_model" ]] || default_model="${model_choices[0]}"
+      while true; do
+        if menu_pick "Model (or type a model id)" "$default_model" "${model_choices[@]}"; then
+          model="$menu_choice"
+          break
+        fi
+        if valid_model_id "$menu_raw_reply"; then
+          model="$menu_raw_reply"
+          break
+        fi
+      done
+    fi
+  fi
+  if [[ -n "$model" ]] && ! valid_model_id "$model"; then
+    echo "Invalid model id." >&2
+    return 2
+  fi
+
+  room="$client-$agent"
+  valid_portable_room_name "$room" || { echo "Invalid room name." >&2; return 2; }
+  if find_room_row "$room"; then
+    if ((fresh == 1)); then
+      room=$(next_fresh_room_name "$room") || { echo "Could not find a free room name for $client $agent." >&2; return 1; }
+    else
+      launch_pref_write \
+        "last_client=$client" \
+        "last_agent=$agent" \
+        "last_model=$model" \
+        "pref.$client.agent=$agent" \
+        "pref.$client.model=$model" \
+        "pref.$client.path=$cwd"
+      echo "Room already exists: $room"
+      if ((no_attach == 1)); then
+        return 0
+      fi
+      echo "Attaching to $room. Detach with Ctrl-b then d."
+      exec tmux attach-session -t "$found_session_id"
+    fi
+  fi
+
+  create_args=("$room" --cwd "$cwd" --agent "$agent" --state running --note "$client $agent")
+  [[ -n "$model" ]] && create_args+=(--model "$model")
+  ((start == 1)) && create_args+=(--start)
+  new_local_room "${create_args[@]}" || return $?
+  launch_pref_write \
+    "last_client=$client" \
+    "last_agent=$agent" \
+    "last_model=$model" \
+    "pref.$client.agent=$agent" \
+    "pref.$client.model=$model" \
+    "pref.$client.path=$cwd"
+  if ((no_attach == 1)); then
+    return 0
+  fi
+  echo "Attaching to $room. Detach with Ctrl-b then d."
+  exec tmux attach-session -t "$created_session_id"
+}
+
 new_local_room() {
-  local room="$1" cwd="" agent="" session_id
+  local room="$1" cwd="" agent="" model="" start=0 session_id build_rc
   local -a metadata_args new_command
   shift
   valid_portable_room_name "$room" || { echo "Invalid room name." >&2; return 2; }
   metadata_args=()
+  agent_argv=()
+  created_session_id=""
   while (($# > 0)); do
     case "$1" in
       --cwd)
@@ -1623,8 +2101,19 @@ new_local_room() {
         ;;
       --agent)
         (($# >= 2)) || { echo "--agent requires a value." >&2; return 2; }
-        case "$2" in claude|codex|grok|gemini|cursor|hermes) agent="$2" ;; *) echo "Unsupported agent: $(sanitize_text "$2")" >&2; return 2 ;; esac
+        valid_agent_name "$2" || { echo "Unsupported agent: $(sanitize_text "$2")" >&2; return 2; }
+        agent="$2"
         shift 2
+        ;;
+      --model)
+        (($# >= 2)) || { echo "--model requires a value." >&2; return 2; }
+        valid_model_id "$2" || { echo "Invalid model id." >&2; return 2; }
+        model="$2"
+        shift 2
+        ;;
+      --start)
+        start=1
+        shift
         ;;
       --driver|--state|--note)
         (($# >= 2)) || { echo "$1 requires a value." >&2; return 2; }
@@ -1639,8 +2128,21 @@ new_local_room() {
     esac
   done
   parse_metadata_args "${metadata_args[@]}" || return $?
+  if [[ -n "$model" && -z "$agent" ]]; then
+    echo "--model requires --agent." >&2
+    return 2
+  fi
   if [[ -n "$agent" ]]; then
-    command -v "$agent" >/dev/null 2>&1 || { echo "Agent command not found: $agent" >&2; return 127; }
+    build_rc=0
+    build_agent_argv "$agent" "$model" "$start" || build_rc=$?
+    if ((build_rc == 127)); then
+      echo "Agent command not found: $agent" >&2
+      return 127
+    fi
+    if ((build_rc != 0)); then
+      echo "Could not build a safe agent command." >&2
+      return 2
+    fi
     if [[ "$metadata_driver_mode" == "keep" ]]; then
       metadata_driver_mode="set"
       metadata_driver_value="$agent"
@@ -1653,7 +2155,7 @@ new_local_room() {
   fi
   new_command=(tmux new-session -d -P -F '#{session_id}' -s "$room")
   [[ -n "$cwd" ]] && new_command+=(-c "$cwd")
-  [[ -n "$agent" ]] && new_command+=("$agent")
+  ((${#agent_argv[@]} > 0)) && new_command+=("${agent_argv[@]}")
   session_id=$("${new_command[@]}")
   if [[ ! "$session_id" =~ ^\$[0-9]+$ ]]; then
     echo "Room creation succeeded, but setup failed because tmux did not return a safe immutable ID." >&2
@@ -1676,6 +2178,10 @@ new_local_room() {
     fi
     return 1
   fi
+  if [[ "$start" == "1" && "$agent" == "hermes" ]]; then
+    tmux send-keys -t "$session_id" -- '/start' C-m || true
+  fi
+  created_session_id="$session_id"
   echo "Created room: $room ($session_id)"
 }
 
@@ -2422,7 +2928,14 @@ fleet_attach_index() {
       return 1
     fi
     echo "Attaching to $room. Detach with Ctrl-b then d."
-    exec tmux attach-session -t "$session_id"
+    if [[ -n "${TMUX:-}" ]]; then
+      # We are already a tmux client on this server. Switch the client instead
+      # of nesting a second tmux client (which produces duplicate status bars).
+      tmux switch-client -t "$session_id"
+    else
+      tmux attach-session -t "$session_id"
+    fi
+    return $?
   fi
   if ! valid_device_label "$device" || ! valid_portable_room_name "$room" || [[ ! "$session_id" =~ ^\$[0-9]+$ ]]; then
     echo "Invalid remote room identity." >&2
@@ -2431,8 +2944,9 @@ fleet_attach_index() {
   remote=$(lookup_host "$device") || { echo "Device is no longer configured: $device" >&2; return 1; }
   digits="${session_id#\$}"
   echo "Attaching to $room on $device. Detach with Ctrl-b then d."
-  exec ssh -t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 "$remote" \
+  ssh -t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 "$remote" \
     /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room --attach-id "$digits" "$room"
+  return $?
 }
 
 fleet_picker() {
@@ -2487,7 +3001,10 @@ fleet_picker() {
           printf 'Attach this room? [y/N]: '
           read -r attach_choice || attach_choice=""
           case "$attach_choice" in
-            y|Y|yes|YES) fleet_attach_index "$index"; return $? ;;
+            y|Y|yes|YES)
+              fleet_attach_index "$index" || true
+              selected=0
+              ;;
             *) echo "Attachment cancelled." ;;
           esac
         else
@@ -2740,6 +3257,13 @@ fi
 
 require_local_dependencies
 
+# With a configured host registry, the default command is the cross-device
+# fleet picker. Preserve the local-only picker when no remote devices exist.
+if [[ $# -eq 0 ]] && [[ -s "$TMUX_ROOM_HOSTS_FILE" ]] && grep -Eq '^[[:space:]]*[^#[:space:]]+[[:space:]]+[^[:space:]]+' "$TMUX_ROOM_HOSTS_FILE"; then
+  run_fleet
+  exit $?
+fi
+
 case "${1:-}" in
   --fleet-json) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --fleet-json" >&2; exit 2; }; print_fleet_json; exit $? ;;
   --fleet) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --fleet" >&2; exit 2; }; run_fleet; exit $? ;;
@@ -2753,6 +3277,11 @@ case "${1:-}" in
   --inspect)
     [[ $# -eq 2 ]] || { echo "Usage: tmux-room --inspect <room|device:room>" >&2; exit 2; }
     inspect_local_room "$2"
+    exit $?
+    ;;
+  --open|--launch)
+    shift
+    open_launch_wizard "$@"
     exit $?
     ;;
   --new)
