@@ -969,12 +969,13 @@ assert_contains "$open_worktree" "Unknown client: acme-task-99"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
 
 rm -f "$TMUX_ROOM_CONFIG_DIR/launch"
+printf '128\n' > "$TMUX_ROOM_CONFIG_DIR/favorites"
 listed=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
   "$SCRIPT" --open --list-clients)
 assert_contains "$listed" "* 226  ACC  Almondos California Co."
-assert_contains "$listed" "128  CS  California Strategies"
-assert_before "$listed" "226" "128"
-assert_before "$listed" "128" "acme"
+assert_contains "$listed" "* 128  CS  California Strategies"
+assert_before "$listed" "128" "226"
+assert_before "$listed" "226" "acme"
 
 mkdir -p "$MOCK/pinned/fromid"
 FROMID_REAL=$(cd "$MOCK/pinned/fromid" && pwd -P)

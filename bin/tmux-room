@@ -92,6 +92,7 @@ Open options (--open / --launch):
 Client registry:
   ~/.config/tmux-room/clients     Optional slug /path lines
   ~/.config/tmux-room/launch      Last client, agent, and per-client defaults
+  ~/.config/tmux-room/favorites   Extra favorite ids or slugs, one per line
   TMUX_ROOM_CODE_DIR              Extra git folders to offer (default: ~/code)
 
 Cleanup options:
@@ -1766,6 +1767,7 @@ is_git_worktree() {
 load_client_catalog() {
   local code_dir="${TMUX_ROOM_CODE_DIR:-$HOME/code}"
   local clients_file="${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients}"
+  local favorites_file="${TMUX_ROOM_FAVORITES_FILE:-$TMUX_ROOM_CONFIG_DIR/favorites}"
   local catalog kind key label slug path
   client_slugs=()
   client_paths=()
@@ -1776,6 +1778,7 @@ load_client_catalog() {
   catalog=$(
     TMUX_ROOM_CODE_DIR="$code_dir" \
     TMUX_ROOM_CLIENTS_FILE="$clients_file" \
+    TMUX_ROOM_FAVORITES_FILE="$favorites_file" \
     python3 - <<'PY'
 import json
 import os
@@ -1785,6 +1788,7 @@ from pathlib import Path
 
 code_dir = Path(os.environ.get("TMUX_ROOM_CODE_DIR") or "")
 clients_file = Path(os.environ.get("TMUX_ROOM_CLIENTS_FILE") or "")
+favorites_file = Path(os.environ.get("TMUX_ROOM_FAVORITES_FILE") or "")
 slug_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 def clean(value):
@@ -1830,6 +1834,16 @@ try:
             }
 except (OSError, ValueError, subprocess.TimeoutExpired):
     pass
+
+local_favs = set()
+if favorites_file.is_file():
+    try:
+        for raw in favorites_file.read_text(errors="ignore").splitlines():
+            token = raw.strip()
+            if token and not token.startswith("#"):
+                local_favs.add(token)
+    except OSError:
+        pass
 
 overrides = []
 if clients_file.is_file():
@@ -1899,20 +1913,38 @@ for repo in repos:
     if not repo["id"]:
         repo["id"] = match_client_id(repo["slug"])
 
+for repo in repos:
+    if repo["slug"] in local_favs and repo["id"]:
+        local_favs.add(repo["id"])
+        if repo["id"] in names:
+            names[repo["id"]]["favorite"] = True
+
+for token in list(local_favs):
+    if token.isdigit() and token in names:
+        names[token]["favorite"] = True
+
+def is_favorite(key, rows):
+    if key in local_favs:
+        return True
+    if key.isdigit() and names.get(key, {}).get("favorite"):
+        return True
+    return any(row["slug"] in local_favs for row in rows)
+
 def label_for(key, slug):
     if key.isdigit() and key in names:
         short = names[key]["short"]
         name = names[key]["name"]
-        star = "* " if names[key].get("favorite") else ""
+        star = "* " if is_favorite(key, [{"slug": slug}]) else ""
         extra = short if short and short.lower() != name.lower() else ""
         if extra:
             return "%s%s  %s  %s" % (star, key, extra, name)
         if name:
             return "%s%s  %s" % (star, key, name)
         return "%s%s" % (star, key)
+    star = "* " if is_favorite(key, [{"slug": slug}]) else ""
     if key.isdigit():
-        return "%s  %s" % (key, slug)
-    return slug
+        return "%s%s  %s" % (star, key, slug)
+    return "%s%s" % (star, slug)
 
 groups = {}
 for repo in repos:
@@ -1920,13 +1952,11 @@ for repo in repos:
     groups.setdefault(key, []).append(repo)
 
 def sort_key(item):
-    key, _rows = item
-    favorite = 1
-    if key.isdigit() and key in names and names[key].get("favorite"):
-        favorite = 0
+    key, rows = item
+    favorite = 0 if is_favorite(key, rows) else 1
     if key.isdigit():
         return (favorite, 0, int(key), key)
-    return (1, 1, 0, key.lower())
+    return (favorite, 1, 0, key.lower())
 
 for key, rows in sorted(groups.items(), key=sort_key):
     print("C\t%s\t%s" % (key, label_for(key, rows[0]["slug"])))
