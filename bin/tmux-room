@@ -790,10 +790,10 @@ for sid, pane_items in panes.items():
     found = None
     found_provider = None
     found_pane = None
-    queue = [pid for _, pid, _ in pane_items]
+    queue = [(pid, pane_id) for pane_id, pid, _ in pane_items]
     seen = set()
     while queue and not found:
-        pid = queue.pop(0)
+        pid, pane_id = queue.pop(0)
         if pid in seen:
             continue
         seen.add(pid)
@@ -804,7 +804,7 @@ for sid, pane_items in panes.items():
             found_provider = provider
             found_pane = pane_for_pid(pid, pane_items)
             break
-        queue.extend(children.get(pid, []))
+        queue.extend((child, pane_id) for child in children.get(pid, []))
     if not found:
         for pane_id, _, hint in pane_items:
             provider = identify(hint)
@@ -1908,6 +1908,16 @@ menu_pick() {
   return 1
 }
 
+attach_local_room() {
+  local session_id="$1" room="$2"
+  echo "Attaching to $room. Detach with Ctrl-b then d."
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "$session_id"
+    return $?
+  fi
+  exec tmux attach-session -t "$session_id"
+}
+
 next_fresh_room_name() {
   local base="$1" suffix=2
   valid_portable_room_name "$base" || return 1
@@ -1928,6 +1938,7 @@ next_fresh_room_name() {
 open_launch_wizard() {
   local client="" agent="" model="" cwd="" fresh=0 no_attach=0 start=1
   local room path default_client default_agent default_model
+  local last_saved_agent last_saved_model model_default_ok
   local -a agent_choices model_choices create_args
   created_session_id=""
   while (($# > 0)); do
@@ -2019,7 +2030,14 @@ open_launch_wizard() {
   valid_agent_name "$agent" || { echo "Unsupported agent: $(sanitize_text "$agent")" >&2; return 2; }
   resolve_agent_bin "$agent" >/dev/null 2>&1 || { echo "Agent command not found: $agent" >&2; return 127; }
 
-  default_model=$(launch_pref_get "pref.$client.model" || launch_pref_get last_model || true)
+  default_model=$(launch_pref_get "pref.$client.$agent.model" || true)
+  if [[ -z "$default_model" ]]; then
+    last_saved_agent=$(launch_pref_get last_agent || true)
+    last_saved_model=$(launch_pref_get last_model || true)
+    if [[ "$last_saved_agent" == "$agent" && -n "$last_saved_model" ]]; then
+      default_model="$last_saved_model"
+    fi
+  fi
   model_choices=()
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" ]] && model_choices+=("$line")
@@ -2032,7 +2050,9 @@ open_launch_wizard() {
         break
       fi
     done
-    ((model_default_ok == 0)) && default_model=""
+    if ((model_default_ok == 0)); then
+      default_model=""
+    fi
   fi
   if [[ -z "$model" ]]; then
     if ((${#model_choices[@]} == 0)); then
@@ -2073,19 +2093,13 @@ open_launch_wizard() {
         "last_agent=$agent" \
         "last_model=$model" \
         "pref.$client.agent=$agent" \
-        "pref.$client.model=$model" \
+        "pref.$client.$agent.model=$model" \
         "pref.$client.path=$cwd"
       echo "Room already exists: $room"
       if ((no_attach == 1)); then
         return 0
       fi
-      echo "Attaching to $room. Detach with Ctrl-b then d."
-      if [[ -n "${TMUX:-}" ]]; then
-        tmux switch-client -t "$found_session_id"
-      else
-        exec tmux attach-session -t "$found_session_id"
-      fi
-      return $?
+      attach_local_room "$found_session_id" "$room"
     fi
   fi
 
@@ -2098,17 +2112,12 @@ open_launch_wizard() {
     "last_agent=$agent" \
     "last_model=$model" \
     "pref.$client.agent=$agent" \
-    "pref.$client.model=$model" \
+    "pref.$client.$agent.model=$model" \
     "pref.$client.path=$cwd"
   if ((no_attach == 1)); then
     return 0
   fi
-  echo "Attaching to $room. Detach with Ctrl-b then d."
-  if [[ -n "${TMUX:-}" ]]; then
-    tmux switch-client -t "$created_session_id"
-  else
-    exec tmux attach-session -t "$created_session_id"
-  fi
+  attach_local_room "$created_session_id" "$room"
 }
 
 new_local_room() {

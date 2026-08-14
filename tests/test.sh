@@ -294,6 +294,7 @@ case "$1" in
     ;;
   kill-session) exit 0 ;;
   attach-session) exit 0 ;;
+  switch-client) exit 0 ;;
 esac
 EOF
 
@@ -943,7 +944,7 @@ assert_contains "$(<"$TMUX_LOG")" "grok --model grok-4.6 /start"
 [[ -f "$TMUX_ROOM_CONFIG_DIR/launch" ]] || fail "open should write launch prefs"
 assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "last_client=acme"
 assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "pref.acme.agent=grok"
-assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "pref.acme.model=grok-4.6"
+assert_contains "$(<"$TMUX_ROOM_CONFIG_DIR/launch")" "pref.acme.grok.model=grok-4.6"
 
 : > "$TMUX_LOG"
 open_again=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
@@ -966,6 +967,41 @@ open_no_tty=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STA
   "$SCRIPT" --open 2>&1 || true)
 assert_contains "$open_no_tty" "Usage: tmux-room --open"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+
+mkdir -p "$MOCK/code/zeta/.git" "$MOCK/pinned/zeta"
+PINNED_ZETA=$(cd "$MOCK/pinned/zeta" && pwd -P)
+printf 'zeta %s\n' "$PINNED_ZETA" > "$TMUX_ROOM_CONFIG_DIR/clients"
+: > "$TMUX_LOG"
+open_pinned=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client zeta --agent grok --model grok-4.6 --no-attach)
+assert_contains "$open_pinned" "Created room: zeta-grok (\$3)"
+assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s zeta-grok -c $PINNED_ZETA grok --model grok-4.6 /start"
+rm -f "$TMUX_STATE/new-room"
+
+cat > "$MOCK/claude" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$MOCK/claude"
+: > "$TMUX_LOG"
+open_claude=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client acme --agent claude --no-attach)
+assert_contains "$open_claude" "Created room: acme-claude (\$3)"
+assert_contains "$(<"$TMUX_LOG")" "claude --model sonnet /start"
+assert_not_contains "$(<"$TMUX_LOG")" "grok-4.6"
+rm -f "$TMUX_STATE/new-room"
+
+printf 'acme-grok\n' > "$TMUX_STATE/new-room"
+: > "$TMUX_LOG"
+open_switch=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+  TMUX=/tmp/tmux-room-fake TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
+  "$SCRIPT" --open --client acme --agent grok 2>&1) || true
+assert_contains "$open_switch" "Room already exists: acme-grok"
+assert_contains "$(<"$TMUX_LOG")" "switch-client -t $MOCK_ID_3"
+assert_not_contains "$(<"$TMUX_LOG")" "attach-session"
+rm -f "$TMUX_STATE/new-room"
 
 : > "$TMUX_LOG"
 arbitrary_command_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --new gamma --command whoami 2>&1 || true)
