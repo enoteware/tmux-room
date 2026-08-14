@@ -1839,15 +1839,17 @@ if clients_file.is_file():
             if not line or line.startswith("#"):
                 continue
             parts = line.split()
+            pin_id = ""
             if len(parts) == 2:
                 slug, path = parts
             elif len(parts) >= 3 and parts[0].isdigit():
-                slug, path = parts[1], parts[2]
+                pin_id, slug, path = parts[0], parts[1], parts[2]
             else:
                 continue
             path_obj = Path(path)
             if slug_re.match(slug) and path_obj.is_dir() and not is_worktree(path_obj):
-                overrides.append((slug, str(path_obj.resolve()), read_env_client_id(path_obj)))
+                client_id = read_env_client_id(path_obj) or pin_id
+                overrides.append((slug, str(path_obj.resolve()), client_id))
     except OSError:
         pass
 
@@ -2056,6 +2058,20 @@ menu_pick() {
     return 0
   fi
   if [[ "$reply" =~ ^[0-9]+$ ]]; then
+    matches=0
+    match=""
+    for i in "${!items[@]}"; do
+      case "${items[i]}" in
+        "$reply  "*|"* $reply  "*)
+          matches=$((matches + 1))
+          match="${items[i]}"
+          ;;
+      esac
+    done
+    if ((matches == 1)); then
+      menu_choice="$match"
+      return 0
+    fi
     if ((reply >= 1 && reply <= ${#items[@]})); then
       menu_choice="${items[$((reply - 1))]}"
       return 0
