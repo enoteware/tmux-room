@@ -664,7 +664,7 @@ unknown_json=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --js
 printf '%s' "$unknown_json" | /usr/bin/python3 -c '
 import json, sys
 metadata = json.load(sys.stdin)["rooms"][0]["metadata"]
-assert metadata["driver"] == "claude-fable5-low"
+assert metadata["driver"] == "unknown"
 assert metadata["state"] == "unknown"
 assert metadata["state_updated_at"] is None
 assert metadata["state_age_seconds"] is None

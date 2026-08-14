@@ -765,23 +765,6 @@ def label(args, provider):
         model = model[len('claude-'):]
     return model if model != 'unknown' else provider.title()
 
-def pane_model(pane_id, provider):
-    text = subprocess.run(
-        ['tmux', 'capture-pane', '-p', '-t', pane_id, '-S', '-40'],
-        capture_output=True, text=True, check=False
-    ).stdout
-    patterns = [
-        r'\b(gpt-[A-Za-z0-9._-]+)\b',
-        r'\b(Grok\s+\d+(?:\.\d+)?)\b',
-        r'\b(Claude\s+(?:Opus|Sonnet|Haiku)[A-Za-z0-9 ._-]*)\b',
-        r'\b(gemini-[A-Za-z0-9._-]+)\b',
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.I)
-        if matches:
-            return matches[-1].strip()
-    return provider.title()
-
 for sid, pane_items in panes.items():
     found = None
     found_provider = None
@@ -809,8 +792,6 @@ for sid, pane_items in panes.items():
                 found_provider = provider
                 found_pane = pane_id
                 break
-    if found_provider and (not found or found == found_provider.title()):
-        found = pane_model(found_pane or pane_items[0][0], found_provider)
     print(f'{sid}\t{found or "none"}')
 PY
 )
@@ -1314,10 +1295,6 @@ PY
     first_path=$(sanitize_text "$first_path")
     metadata_load "$session_id"
     effective_driver="$metadata_driver"
-    if [[ "$effective_driver" == "unknown" || -z "$effective_driver" ]]; then
-      effective_driver=$(compact_agent_label "$session_id")
-      [[ "$effective_driver" == "none" || -z "$effective_driver" ]] && effective_driver="unknown"
-    fi
     ((first == 1)) || printf ','
     first=0
     TMUX_ROOM_JSON_ID="$session_id" \
@@ -1853,12 +1830,24 @@ sort_client_slugs() {
 }
 
 menu_pick() {
-  local title="$1" default="$2" i reply matches match
+  local title="$1" default="$2" i reply matches match default_ok
   shift 2
   local -a items=("$@")
   menu_choice=""
   menu_raw_reply=""
   ((${#items[@]} > 0)) || return 1
+  if [[ -n "$default" ]]; then
+    default_ok=0
+    for i in "${!items[@]}"; do
+      if [[ "${items[i]}" == "$default" ]]; then
+        default_ok=1
+        break
+      fi
+    done
+    if ((default_ok == 0)); then
+      default=""
+    fi
+  fi
   echo
   echo "$title"
   for i in "${!items[@]}"; do
@@ -1869,7 +1858,7 @@ menu_pick() {
     fi
   done
   printf 'Choice [%s]: ' "${default:-${items[0]}}"
-  IFS= read -r reply || return 1
+  IFS= read -r reply || return 2
   reply="${reply#"${reply%%[![:space:]]*}"}"
   reply="${reply%"${reply##*[![:space:]]}"}"
   menu_raw_reply="$reply"
@@ -1939,7 +1928,7 @@ next_fresh_room_name() {
 open_launch_wizard() {
   local client="" agent="" model="" cwd="" fresh=0 no_attach=0 start=1
   local room path default_client default_agent default_model
-  local last_saved_agent last_saved_model model_default_ok models_text
+  local last_saved_agent last_saved_model model_default_ok models_text pick_rc agent_default_ok
   local -a agent_choices model_choices create_args
   created_session_id=""
   while (($# > 0)); do
@@ -1992,7 +1981,15 @@ open_launch_wizard() {
       echo "Usage: tmux-room --open --client <slug> --agent <name> [--model <id>]" >&2
       return 2
     fi
-    while ! menu_pick "Client" "$default_client" "${client_slugs[@]}"; do :; done
+    while true; do
+      menu_pick "Client" "$default_client" "${client_slugs[@]}"
+      pick_rc=$?
+      if ((pick_rc == 2)); then
+        echo "Cancelled." >&2
+        return 1
+      fi
+      ((pick_rc == 0)) && break
+    done
     client="$menu_choice"
   fi
   valid_client_slug "$client" || { echo "Invalid client slug." >&2; return 2; }
@@ -2024,8 +2021,28 @@ open_launch_wizard() {
       echo "Usage: tmux-room --open --client <slug> --agent <name> [--model <id>]" >&2
       return 2
     fi
+    if [[ -n "$default_agent" ]]; then
+      agent_default_ok=0
+      for line in "${agent_choices[@]}"; do
+        if [[ "$line" == "$default_agent" ]]; then
+          agent_default_ok=1
+          break
+        fi
+      done
+      if ((agent_default_ok == 0)); then
+        default_agent=""
+      fi
+    fi
     [[ -n "$default_agent" ]] || default_agent="${agent_choices[0]}"
-    while ! menu_pick "Agent" "$default_agent" "${agent_choices[@]}"; do :; done
+    while true; do
+      menu_pick "Agent" "$default_agent" "${agent_choices[@]}"
+      pick_rc=$?
+      if ((pick_rc == 2)); then
+        echo "Cancelled." >&2
+        return 1
+      fi
+      ((pick_rc == 0)) && break
+    done
     agent="$menu_choice"
   fi
   valid_agent_name "$agent" || { echo "Unsupported agent: $(sanitize_text "$agent")" >&2; return 2; }
@@ -2068,7 +2085,13 @@ open_launch_wizard() {
     else
       [[ -n "$default_model" ]] || default_model="${model_choices[0]}"
       while true; do
-        if menu_pick "Model (or type a model id)" "$default_model" "${model_choices[@]}"; then
+        menu_pick "Model (or type a model id)" "$default_model" "${model_choices[@]}"
+        pick_rc=$?
+        if ((pick_rc == 2)); then
+          echo "Cancelled." >&2
+          return 1
+        fi
+        if ((pick_rc == 0)); then
           model="$menu_choice"
           break
         fi
@@ -2102,6 +2125,7 @@ open_launch_wizard() {
         return 0
       fi
       attach_local_room "$found_session_id" "$room"
+      return $?
     fi
   fi
 
