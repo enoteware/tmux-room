@@ -70,7 +70,7 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 
 bash -n "$SCRIPT"
 bash -n "$ROOT/install.sh"
-[[ "$($SCRIPT --version)" == "tmux-room 0.5.1" ]] || fail "version should be 0.5.1"
+[[ "$($SCRIPT --version)" == "tmux-room 0.6.0" ]] || fail "version should be 0.6.0"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"
@@ -81,6 +81,7 @@ assert_contains "$help" "--json"
 assert_contains "$help" "--inspect"
 assert_contains "$help" "--metadata"
 assert_contains "$help" "--cleanup-stale"
+assert_contains "$help" "tmux-room/emoji"
 assert_contains "$help" "--open"
 assert_contains "$help" "--model"
 assert_contains "$help" "--list-clients"
@@ -485,7 +486,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'TMUX_ROOM_VERSION="broken"' '(' > "$INVALID
 cp "$SCRIPT" "$UPDATE_DIR/invalid-copy"
 invalid_update_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" "$UPDATE_DIR/invalid-copy" --update 2>&1 || true)
 assert_contains "$invalid_update_output" "syntax error"
-[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.5.1" ]] || fail "invalid update replaced the installed copy"
+[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.6.0" ]] || fail "invalid update replaced the installed copy"
 
 invalid_install_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" 2>&1 || true)
@@ -497,11 +498,11 @@ MISSING_VERSION="$UPDATE_DIR/missing-version"
 printf '%s\n' '#!/usr/bin/env bash' 'echo missing' > "$MISSING_VERSION"
 cp "$SCRIPT" "$UPDATE_DIR/missing-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$MISSING_VERSION" "$UPDATE_DIR/missing-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.5.1" ]] || fail "versionless update replaced the installed copy"
+[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.6.0" ]] || fail "versionless update replaced the installed copy"
 
 cp "$SCRIPT" "$UPDATE_DIR/download-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 "$UPDATE_DIR/download-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.5.1" ]] || fail "failed download replaced the installed copy"
+[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.6.0" ]] || fail "failed download replaced the installed copy"
 
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" >/dev/null 2>&1 || true
@@ -969,12 +970,13 @@ assert_contains "$open_worktree" "Unknown client: acme-task-99"
 assert_not_contains "$(<"$TMUX_LOG")" "new-session"
 
 rm -f "$TMUX_ROOM_CONFIG_DIR/launch"
+printf '128\n' > "$TMUX_ROOM_CONFIG_DIR/favorites"
 listed=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox TMUX_ROOM_CODE_DIR="$MOCK/code" \
   "$SCRIPT" --open --list-clients)
 assert_contains "$listed" "* 226  ACC  Almondos California Co."
-assert_contains "$listed" "128  CS  California Strategies"
-assert_before "$listed" "226" "128"
-assert_before "$listed" "128" "acme"
+assert_contains "$listed" "* 128  CS  California Strategies"
+assert_before "$listed" "128" "226"
+assert_before "$listed" "226" "acme"
 
 mkdir -p "$MOCK/pinned/fromid"
 FROMID_REAL=$(cd "$MOCK/pinned/fromid" && pwd -P)
@@ -1635,6 +1637,72 @@ assert_contains "$real_kill" "Killed room: renamed-room"
 real_pipe_kill=$(printf 'a|b\nKILL\n' | PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
   "$SCRIPT" --kill 'a|b')
 assert_contains "$real_pipe_kill" "Killed room: a|b"
+
+# --- client/project emoji map -------------------------------------------------
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" new-session -d -s natural-catch-pdp -c "$MOCK/workspace"
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" new-session -d -s naturalcatchers -c "$MOCK/workspace"
+EMOJI_FILE="$MOCK/emoji-map"
+cat > "$EMOJI_FILE" <<'EMOJI'
+# comment line is ignored
+natural-catch  🐟
+airline        ✈   # a trailing inline comment must not join the glyph
+   
+bad-line-without-glyph
+EMOJI
+
+emoji_run() {
+  PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET"     TMUX_ROOM_DISABLE_UPDATE_CHECK=1 TMUX_ROOM_EMOJI_FILE="$1" COLUMNS=200 "$SCRIPT" --list
+}
+
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" new-session -d -s airline-ops -c "$MOCK/workspace"
+emoji_listing=$(emoji_run "$EMOJI_FILE")
+assert_contains "$emoji_listing" "🐟 natural-catch-pdp"
+# a bare ambiguous-width glyph is pinned to emoji presentation so columns hold
+assert_contains "$emoji_listing" "✈️ airline-ops"
+# every rendered row must put the MODEL column in the same place
+printf '%s' "$emoji_listing" | /usr/bin/python3 -c '
+import sys, unicodedata
+VS16 = "️"
+ZERO = frozenset([0x200D, 0x20E3] + list(range(0xFE00, 0xFE10)) + list(range(0x1F3FB, 0x1F400)))
+
+def width(value):
+    total = 0
+    for i, ch in enumerate(value):
+        point = ord(ch)
+        if unicodedata.combining(ch) or point in ZERO:
+            continue
+        if value[i + 1:i + 2] == VS16 or unicodedata.east_asian_width(ch) in ("W", "F"):
+            total += 2
+        else:
+            total += 2 if 0x1F300 <= point <= 0x1FAFF else 1
+    return total
+
+starts = {width(l[:l.index("unknown")]) for l in sys.stdin.read().splitlines() if "unknown" in l}
+if len(starts) != 1:
+    raise SystemExit("emoji rows misaligned the MODEL column: %r" % sorted(starts))
+' || fail "emoji rows misaligned the table columns"
+# prefix must end on a non-alphanumeric boundary, so naturalcatchers stays bare
+case "$emoji_listing" in
+  *"🐟 naturalcatchers"*) fail "emoji prefix matched across a word boundary";;
+esac
+assert_contains "$emoji_listing" "naturalcatchers"
+assert_max_display_width "$emoji_listing" 200
+
+# the emoji is display only: json and inspect keep the real room name
+emoji_json=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET"   TMUX_ROOM_DISABLE_UPDATE_CHECK=1 TMUX_ROOM_EMOJI_FILE="$EMOJI_FILE" "$SCRIPT" --json natural-catch-pdp)
+printf '%s' "$emoji_json" | /usr/bin/python3 -c 'import json,sys; assert json.load(sys.stdin)["rooms"][0]["name"] == "natural-catch-pdp"'
+
+# a missing map file renders plain names instead of failing
+emoji_missing=$(emoji_run "$MOCK/no-such-emoji-file")
+assert_contains "$emoji_missing" "natural-catch-pdp"
+case "$emoji_missing" in
+  *"🐟"*) fail "missing emoji map still produced a glyph";;
+esac
+
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t airline-ops
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t natural-catch-pdp
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t naturalcatchers
+
 REAL_TMUX_SOCKET=""
 
 echo "tests passed"

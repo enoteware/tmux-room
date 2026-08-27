@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.5.1"
+TMUX_ROOM_VERSION="0.6.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
+TMUX_ROOM_EMOJI_FILE="${TMUX_ROOM_EMOJI_FILE:-$TMUX_ROOM_CONFIG_DIR/emoji}"
 TMUX_ROOM_SCHEMA="tmux-room.inventory"
 TMUX_ROOM_SCHEMA_VERSION=1
 TMUX_ROOM_FLEET_SCHEMA="tmux-room.fleet"
@@ -92,6 +93,19 @@ Open options (--open / --launch):
 Client registry:
   ~/.config/tmux-room/clients     Optional slug /path lines
   ~/.config/tmux-room/launch      Last client, agent, and per-client defaults
+  ~/.config/tmux-room/favorites   Extra favorite ids or slugs, one per line
+  ~/.config/tmux-room/emoji       Client/project emoji, "<prefix> <emoji>" per line
+
+Emoji map:
+  Rooms are shown with the emoji of the client or project they belong to.
+  A line matches when the room name equals the prefix, or starts with it and
+  the next character is not a letter or digit.
+
+    natural-catch  🐟      # natural-catch-pdp  -> 🐟 natural-catch-pdp
+    propfirms      📈      # propfirms-arrows   -> 📈 propfirms-arrows
+
+  The emoji is display only. Attach, search, and --json always use the real
+  room name.
   TMUX_ROOM_CODE_DIR              Extra git folders to offer (default: ~/code)
 
 Cleanup options:
@@ -1012,10 +1026,59 @@ for row in sorted(rows):
   )
 }
 
+# Emit "prefix<TAB>emoji" lines from the optional emoji map. Invalid lines are
+# skipped rather than failing the render, so a typo never blocks the picker.
+emoji_map_payload() {
+  [[ -r "$TMUX_ROOM_EMOJI_FILE" ]] || return 0
+  TMUX_ROOM_EMOJI_FILE="$TMUX_ROOM_EMOJI_FILE" python3 -c '
+import os
+import re
+import sys
+import unicodedata
+
+path = os.environ["TMUX_ROOM_EMOJI_FILE"]
+try:
+    raw = open(path, encoding="utf-8", errors="ignore").read()
+except OSError:
+    sys.exit(0)
+
+out = []
+for line in raw.splitlines()[:512]:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split(None, 1)
+    if len(parts) != 2:
+        continue
+    key, glyph = parts[0].strip().casefold(), parts[1].strip()
+    if not key or len(key) > 64:
+        continue
+    if any(ch.isspace() for ch in key):
+        continue
+    # Drop a trailing inline comment. The "#" must be preceded by whitespace so
+    # the keycap emoji "#\ufe0f\u20e3" survives as a glyph in its own right.
+    glyph = re.split(r"\s#", glyph, maxsplit=1)[0].strip()
+    glyph = "".join(
+        ch for ch in glyph
+        if ch.isprintable() and not unicodedata.category(ch).startswith("C")
+    )
+    if not glyph or len(glyph) > 8:
+        continue
+    # A bare glyph such as U+2708 renders one column wide in text presentation
+    # and two in emoji presentation. Pin it to emoji so column math is stable.
+    if len(glyph) == 1 and 0x2190 <= ord(glyph) <= 0x2BFF:
+        glyph += "\ufe0f"
+    out.append(key + "\t" + glyph)
+
+sys.stdout.write("\n".join(out))
+' 2>/dev/null || true
+}
+
 render_view_table() {
   local mode="$1" selected="$2" header="$3" subheader="$4" controls="$5" query="$6"
-  local width i index target selected_flag
+  local width i index target selected_flag emoji_map
   width=$(terminal_columns)
+  emoji_map=$(emoji_map_payload)
   {
     if [[ "$mode" == "fleet" ]]; then
       for i in "${!fleet_unavailable_names[@]}"; do
@@ -1034,7 +1097,8 @@ render_view_table() {
     done
   } | TMUX_ROOM_RENDER_WIDTH="$width" TMUX_ROOM_RENDER_HEADER="$header" \
       TMUX_ROOM_RENDER_SUBHEADER="$subheader" TMUX_ROOM_RENDER_CONTROLS="$controls" \
-      TMUX_ROOM_RENDER_QUERY="$query" TMUX_ROOM_RENDER_MODE="$mode" python3 -c '
+      TMUX_ROOM_RENDER_QUERY="$query" TMUX_ROOM_RENDER_MODE="$mode" \
+      TMUX_ROOM_RENDER_EMOJI="$emoji_map" python3 -c '
 from datetime import datetime
 import os
 import sys
@@ -1046,13 +1110,37 @@ mode = os.environ.get("TMUX_ROOM_RENDER_MODE", "local")
 def clean(value):
     return "".join(ch for ch in str(value or "") if ch.isprintable() and not unicodedata.category(ch).startswith("C"))
 
-def char_width(ch):
-    if unicodedata.combining(ch):
-        return 0
-    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+VARIATION_SELECTOR_16 = "\ufe0f"
+ZERO_WIDTH = frozenset(
+    [0x200D, 0x20E3]
+    + list(range(0xFE00, 0xFE10))
+    + list(range(0x1F3FB, 0x1F400))
+)
+
+def char_widths(value):
+    """Per-character display widths, aware of the following character.
+
+    A glyph such as U+2708 is one column on its own but two when U+FE0F asks
+    for emoji presentation, so width cannot be decided character by character.
+    """
+    widths = []
+    for i, ch in enumerate(value):
+        point = ord(ch)
+        if unicodedata.combining(ch) or point in ZERO_WIDTH:
+            widths.append(0)
+            continue
+        if value[i + 1:i + 2] == VARIATION_SELECTOR_16:
+            widths.append(2)
+            continue
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            widths.append(2)
+            continue
+        # Emoji outside the CJK blocks have no text presentation to fall back to.
+        widths.append(2 if 0x1F300 <= point <= 0x1FAFF else 1)
+    return widths
 
 def cell_width(value):
-    return sum(char_width(ch) for ch in clean(value))
+    return sum(char_widths(clean(value)))
 
 def clip(value, limit):
     value = clean(value)
@@ -1064,8 +1152,7 @@ def clip(value, limit):
         return "…"
     out = []
     used = 0
-    for ch in value:
-        size = char_width(ch)
+    for ch, size in zip(value, char_widths(value)):
         if used + size > limit - 1:
             break
         out.append(ch)
@@ -1094,6 +1181,24 @@ if query:
 if header or subheader or controls or query:
     line()
 
+# prefix -> glyph, longest key first so "beat-buddies" beats "beat".
+emoji_rules = []
+for entry in os.environ.get("TMUX_ROOM_RENDER_EMOJI", "").split("\n"):
+    key, sep, glyph = entry.partition("\t")
+    if sep and key and glyph:
+        emoji_rules.append((key, glyph))
+emoji_rules.sort(key=lambda item: len(item[0]), reverse=True)
+
+def decorate(name):
+    """Prefix a room name with its client glyph. Display only - never the real name."""
+    if not emoji_rules:
+        return name
+    low = name.casefold()
+    for key, glyph in emoji_rules:
+        if low == key or (low.startswith(key) and not low[len(key)].isalnum()):
+            return glyph + " " + name
+    return name
+
 rows = []
 statuses = []
 for raw in sys.stdin:
@@ -1117,14 +1222,16 @@ for raw in sys.stdin:
         active = datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M") if stamp else "unknown"
     except (OverflowError, OSError, ValueError):
         active = "unknown"
-    rows.append((number, selected == "1", pin, clean(device), clean(target), clean(driver), clean(state), clean(windows), active, clean(note)))
+    rows.append((number, selected == "1", pin, clean(device), decorate(clean(target)), clean(driver), clean(state), clean(windows), active, clean(note)))
 
 def server_label(device):
     low = device.casefold()
-    if low in ("devbox", "note-devbox"):
+    if low in ("devbox", "note-devbox", "dev"):
         return "🟩 dev"
     if low in ("mac-mini", "mini", "elliots-mac-mini"):
         return "🍎 mini"
+    if low in ("macbook", "mbp", "elliots-macbook-pro", "macbook-pro"):
+        return "💻 mbp"
     return "🖥 " + device
 
 if statuses:
@@ -1766,6 +1873,7 @@ is_git_worktree() {
 load_client_catalog() {
   local code_dir="${TMUX_ROOM_CODE_DIR:-$HOME/code}"
   local clients_file="${TMUX_ROOM_CLIENTS_FILE:-$TMUX_ROOM_CONFIG_DIR/clients}"
+  local favorites_file="${TMUX_ROOM_FAVORITES_FILE:-$TMUX_ROOM_CONFIG_DIR/favorites}"
   local catalog kind key label slug path
   client_slugs=()
   client_paths=()
@@ -1776,6 +1884,7 @@ load_client_catalog() {
   catalog=$(
     TMUX_ROOM_CODE_DIR="$code_dir" \
     TMUX_ROOM_CLIENTS_FILE="$clients_file" \
+    TMUX_ROOM_FAVORITES_FILE="$favorites_file" \
     python3 - <<'PY'
 import json
 import os
@@ -1785,6 +1894,7 @@ from pathlib import Path
 
 code_dir = Path(os.environ.get("TMUX_ROOM_CODE_DIR") or "")
 clients_file = Path(os.environ.get("TMUX_ROOM_CLIENTS_FILE") or "")
+favorites_file = Path(os.environ.get("TMUX_ROOM_FAVORITES_FILE") or "")
 slug_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 def clean(value):
@@ -1830,6 +1940,16 @@ try:
             }
 except (OSError, ValueError, subprocess.TimeoutExpired):
     pass
+
+local_favs = set()
+if favorites_file.is_file():
+    try:
+        for raw in favorites_file.read_text(errors="ignore").splitlines():
+            token = raw.strip()
+            if token and not token.startswith("#"):
+                local_favs.add(token)
+    except OSError:
+        pass
 
 overrides = []
 if clients_file.is_file():
@@ -1899,20 +2019,38 @@ for repo in repos:
     if not repo["id"]:
         repo["id"] = match_client_id(repo["slug"])
 
+for repo in repos:
+    if repo["slug"] in local_favs and repo["id"]:
+        local_favs.add(repo["id"])
+        if repo["id"] in names:
+            names[repo["id"]]["favorite"] = True
+
+for token in list(local_favs):
+    if token.isdigit() and token in names:
+        names[token]["favorite"] = True
+
+def is_favorite(key, rows):
+    if key in local_favs:
+        return True
+    if key.isdigit() and names.get(key, {}).get("favorite"):
+        return True
+    return any(row["slug"] in local_favs for row in rows)
+
 def label_for(key, slug):
     if key.isdigit() and key in names:
         short = names[key]["short"]
         name = names[key]["name"]
-        star = "* " if names[key].get("favorite") else ""
+        star = "* " if is_favorite(key, [{"slug": slug}]) else ""
         extra = short if short and short.lower() != name.lower() else ""
         if extra:
             return "%s%s  %s  %s" % (star, key, extra, name)
         if name:
             return "%s%s  %s" % (star, key, name)
         return "%s%s" % (star, key)
+    star = "* " if is_favorite(key, [{"slug": slug}]) else ""
     if key.isdigit():
-        return "%s  %s" % (key, slug)
-    return slug
+        return "%s%s  %s" % (star, key, slug)
+    return "%s%s" % (star, slug)
 
 groups = {}
 for repo in repos:
@@ -1920,13 +2058,11 @@ for repo in repos:
     groups.setdefault(key, []).append(repo)
 
 def sort_key(item):
-    key, _rows = item
-    favorite = 1
-    if key.isdigit() and key in names and names[key].get("favorite"):
-        favorite = 0
+    key, rows = item
+    favorite = 0 if is_favorite(key, rows) else 1
     if key.isdigit():
         return (favorite, 0, int(key), key)
-    return (1, 1, 0, key.lower())
+    return (favorite, 1, 0, key.lower())
 
 for key, rows in sorted(groups.items(), key=sort_key):
     print("C\t%s\t%s" % (key, label_for(key, rows[0]["slug"])))
@@ -2733,7 +2869,7 @@ print_all_devices() {
     fi
     [[ "$label" == "$(get_device_label)" ]] && continue
     echo
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" \
+    if ! ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$target" \
       /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" "TMUX_ROOM_DEVICE=$label" TMUX_ROOM_SOURCE_LABEL=remote tmux-room --list; then
       echo "DEVICE: $label [unreachable]"
     fi

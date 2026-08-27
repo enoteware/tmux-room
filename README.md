@@ -113,6 +113,8 @@ List rooms across the local device and configured hosts:
 tmux-room --all
 ```
 
+Each device needs its own `hosts` file listing the *other* devices, and each needs `tmux-room` installed: remote inventory is collected by running `tmux-room` on the destination over SSH. `--all` runs `--list` there and prints the result; `--fleet` runs `--json` and merges it into one table.
+
 `--all` keeps the original sequential device tables. For one responsive table and a shared search across every reachable device, use:
 
 ```bash
@@ -136,6 +138,38 @@ tmux-room --kill mini:kh-review
 ```
 
 Remote inspect and JSON commands are read-only and use SSH batch mode without allocating a pseudo-terminal.
+
+## Client and project emoji
+
+Give each client or project a glyph in `~/.config/tmux-room/emoji`, one
+`<prefix> <emoji>` pair per line. Blank lines and `#` comments are ignored.
+
+```text
+# client / project emoji
+natural-catch  🐟
+propfirms      📈
+beat-buddies   🎵
+brain          🧠
+```
+
+Rooms then carry their client's glyph everywhere a room list is drawn: the local
+table, the arrow picker, and the cross-device fleet picker.
+
+```text
+#  P SERVER   ROOM                             ATTENTION
+  1   🟩 dev   🐟 natural-catch-pdp              stale
+  2   🟩 dev   📈 propfirms-arrows               detached
+  3   💻 mbp   🧠 brain-review                   attached
+  4   🍎 mini  🎵 beat-buddies-ship              completed
+```
+
+A prefix matches when the room name equals it, or starts with it and the next
+character is not a letter or digit. So `brain` tags `brain-review` and
+`brain_macbook_report` but leaves `brainstorm-notes` bare. When several prefixes
+match, the longest one wins.
+
+The glyph is display only. Attaching, searching, `--json`, and `--inspect` all
+use the real room name, so `tmux-room natural-catch-pdp` keeps working unchanged.
 
 ## Public JSON inventory contract
 
@@ -272,7 +306,7 @@ Allowed agent names are `claude`, `codex`, `grok`, `gemini`, `cursor`, and `herm
 
 Enter accepts the last choice for that client. The room name is `{client}-{agent}`. If that room already exists, tmux-room attaches it. `--fresh` makes `{client}-{agent}-2` instead.
 
-The client menu is grouped by Invoi client id (`128  CS  California Strategies`). Starred Invoi clients are marked with `*` and listed first. Git worktrees are skipped. If one client has more than one checkout, a second repo menu appears. Internal tools and other folders without an Invoi id still show after the Invoi clients.
+The client menu is grouped by Invoi client id (`128  CS  California Strategies`). Starred Invoi clients are marked with `*` and listed first. Extra local stars live in `~/.config/tmux-room/favorites` (one id or slug per line). Git worktrees are skipped. If one client has more than one checkout, a second repo menu appears. Internal tools and other folders without an Invoi id still show after the Invoi clients.
 
 Optional path pins live in `~/.config/tmux-room/clients`:
 
