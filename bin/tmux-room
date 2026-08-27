@@ -1060,6 +1060,10 @@ for line in raw.splitlines()[:512]:
     )
     if not glyph or len(glyph) > 8:
         continue
+    # A bare glyph such as U+2708 renders one column wide in text presentation
+    # and two in emoji presentation. Pin it to emoji so column math is stable.
+    if len(glyph) == 1 and 0x2190 <= ord(glyph) <= 0x2BFF:
+        glyph += "\ufe0f"
     out.append(key + "\t" + glyph)
 
 sys.stdout.write("\n".join(out))
@@ -1102,24 +1106,37 @@ mode = os.environ.get("TMUX_ROOM_RENDER_MODE", "local")
 def clean(value):
     return "".join(ch for ch in str(value or "") if ch.isprintable() and not unicodedata.category(ch).startswith("C"))
 
+VARIATION_SELECTOR_16 = "\ufe0f"
 ZERO_WIDTH = frozenset(
     [0x200D, 0x20E3]
     + list(range(0xFE00, 0xFE10))
     + list(range(0x1F3FB, 0x1F400))
 )
 
-def char_width(ch):
-    if unicodedata.combining(ch) or ord(ch) in ZERO_WIDTH:
-        return 0
-    if unicodedata.east_asian_width(ch) in ("W", "F"):
-        return 2
-    # Emoji outside the CJK ranges still render double-wide in terminals.
-    if 0x1F300 <= ord(ch) <= 0x1FAFF or 0x2600 <= ord(ch) <= 0x27BF:
-        return 2
-    return 1
+def char_widths(value):
+    """Per-character display widths, aware of the following character.
+
+    A glyph such as U+2708 is one column on its own but two when U+FE0F asks
+    for emoji presentation, so width cannot be decided character by character.
+    """
+    widths = []
+    for i, ch in enumerate(value):
+        point = ord(ch)
+        if unicodedata.combining(ch) or point in ZERO_WIDTH:
+            widths.append(0)
+            continue
+        if value[i + 1:i + 2] == VARIATION_SELECTOR_16:
+            widths.append(2)
+            continue
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            widths.append(2)
+            continue
+        # Emoji outside the CJK blocks have no text presentation to fall back to.
+        widths.append(2 if 0x1F300 <= point <= 0x1FAFF else 1)
+    return widths
 
 def cell_width(value):
-    return sum(char_width(ch) for ch in clean(value))
+    return sum(char_widths(clean(value)))
 
 def clip(value, limit):
     value = clean(value)
@@ -1131,8 +1148,7 @@ def clip(value, limit):
         return "…"
     out = []
     used = 0
-    for ch in value:
-        size = char_width(ch)
+    for ch, size in zip(value, char_widths(value)):
         if used + size > limit - 1:
             break
         out.append(ch)

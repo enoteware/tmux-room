@@ -1645,6 +1645,7 @@ EMOJI_FILE="$MOCK/emoji-map"
 cat > "$EMOJI_FILE" <<'EMOJI'
 # comment line is ignored
 natural-catch  🐟
+airline        ✈
    
 bad-line-without-glyph
 EMOJI
@@ -1653,8 +1654,33 @@ emoji_run() {
   PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET"     TMUX_ROOM_DISABLE_UPDATE_CHECK=1 TMUX_ROOM_EMOJI_FILE="$1" COLUMNS=200 "$SCRIPT" --list
 }
 
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" new-session -d -s airline-ops -c "$MOCK/workspace"
 emoji_listing=$(emoji_run "$EMOJI_FILE")
 assert_contains "$emoji_listing" "🐟 natural-catch-pdp"
+# a bare ambiguous-width glyph is pinned to emoji presentation so columns hold
+assert_contains "$emoji_listing" "✈️ airline-ops"
+# every rendered row must put the MODEL column in the same place
+printf '%s' "$emoji_listing" | /usr/bin/python3 -c '
+import sys, unicodedata
+VS16 = "️"
+ZERO = frozenset([0x200D, 0x20E3] + list(range(0xFE00, 0xFE10)) + list(range(0x1F3FB, 0x1F400)))
+
+def width(value):
+    total = 0
+    for i, ch in enumerate(value):
+        point = ord(ch)
+        if unicodedata.combining(ch) or point in ZERO:
+            continue
+        if value[i + 1:i + 2] == VS16 or unicodedata.east_asian_width(ch) in ("W", "F"):
+            total += 2
+        else:
+            total += 2 if 0x1F300 <= point <= 0x1FAFF else 1
+    return total
+
+starts = {width(l[:l.index("unknown")]) for l in sys.stdin.read().splitlines() if "unknown" in l}
+if len(starts) != 1:
+    raise SystemExit("emoji rows misaligned the MODEL column: %r" % sorted(starts))
+' || fail "emoji rows misaligned the table columns"
 # prefix must end on a non-alphanumeric boundary, so naturalcatchers stays bare
 case "$emoji_listing" in
   *"🐟 naturalcatchers"*) fail "emoji prefix matched across a word boundary";;
@@ -1673,6 +1699,7 @@ case "$emoji_missing" in
   *"🐟"*) fail "missing emoji map still produced a glyph";;
 esac
 
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t airline-ops
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t natural-catch-pdp
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t naturalcatchers
 
