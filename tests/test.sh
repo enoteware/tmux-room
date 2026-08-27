@@ -1637,7 +1637,6 @@ assert_contains "$real_kill" "Killed room: renamed-room"
 real_pipe_kill=$(printf 'a|b\nKILL\n' | PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
   "$SCRIPT" --kill 'a|b')
 assert_contains "$real_pipe_kill" "Killed room: a|b"
-REAL_TMUX_SOCKET=""
 
 # --- client/project emoji map -------------------------------------------------
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" new-session -d -s natural-catch-pdp -c "$MOCK/workspace"
@@ -1676,5 +1675,7 @@ esac
 
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t natural-catch-pdp
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t naturalcatchers
+
+REAL_TMUX_SOCKET=""
 
 echo "tests passed"
