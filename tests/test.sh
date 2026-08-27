@@ -70,7 +70,7 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 
 bash -n "$SCRIPT"
 bash -n "$ROOT/install.sh"
-[[ "$($SCRIPT --version)" == "tmux-room 0.5.1" ]] || fail "version should be 0.5.1"
+[[ "$($SCRIPT --version)" == "tmux-room 0.6.0" ]] || fail "version should be 0.6.0"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"
@@ -81,6 +81,7 @@ assert_contains "$help" "--json"
 assert_contains "$help" "--inspect"
 assert_contains "$help" "--metadata"
 assert_contains "$help" "--cleanup-stale"
+assert_contains "$help" "tmux-room/emoji"
 assert_contains "$help" "--open"
 assert_contains "$help" "--model"
 assert_contains "$help" "--list-clients"
@@ -1637,5 +1638,43 @@ real_pipe_kill=$(printf 'a|b\nKILL\n' | PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL
   "$SCRIPT" --kill 'a|b')
 assert_contains "$real_pipe_kill" "Killed room: a|b"
 REAL_TMUX_SOCKET=""
+
+# --- client/project emoji map -------------------------------------------------
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" new-session -d -s natural-catch-pdp -c "$MOCK/workspace"
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" new-session -d -s naturalcatchers -c "$MOCK/workspace"
+EMOJI_FILE="$MOCK/emoji-map"
+cat > "$EMOJI_FILE" <<'EMOJI'
+# comment line is ignored
+natural-catch  🐟
+   
+bad-line-without-glyph
+EMOJI
+
+emoji_run() {
+  PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET"     TMUX_ROOM_DISABLE_UPDATE_CHECK=1 TMUX_ROOM_EMOJI_FILE="$1" COLUMNS=200 "$SCRIPT" --list
+}
+
+emoji_listing=$(emoji_run "$EMOJI_FILE")
+assert_contains "$emoji_listing" "🐟 natural-catch-pdp"
+# prefix must end on a non-alphanumeric boundary, so naturalcatchers stays bare
+case "$emoji_listing" in
+  *"🐟 naturalcatchers"*) fail "emoji prefix matched across a word boundary";;
+esac
+assert_contains "$emoji_listing" "naturalcatchers"
+assert_max_display_width "$emoji_listing" 200
+
+# the emoji is display only: json and inspect keep the real room name
+emoji_json=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET"   TMUX_ROOM_DISABLE_UPDATE_CHECK=1 TMUX_ROOM_EMOJI_FILE="$EMOJI_FILE" "$SCRIPT" --json natural-catch-pdp)
+printf '%s' "$emoji_json" | /usr/bin/python3 -c 'import json,sys; assert json.load(sys.stdin)["rooms"][0]["name"] == "natural-catch-pdp"'
+
+# a missing map file renders plain names instead of failing
+emoji_missing=$(emoji_run "$MOCK/no-such-emoji-file")
+assert_contains "$emoji_missing" "natural-catch-pdp"
+case "$emoji_missing" in
+  *"🐟"*) fail "missing emoji map still produced a glyph";;
+esac
+
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t natural-catch-pdp
+"$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t naturalcatchers
 
 echo "tests passed"

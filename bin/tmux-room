@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.5.1"
+TMUX_ROOM_VERSION="0.6.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
+TMUX_ROOM_EMOJI_FILE="${TMUX_ROOM_EMOJI_FILE:-$TMUX_ROOM_CONFIG_DIR/emoji}"
 TMUX_ROOM_SCHEMA="tmux-room.inventory"
 TMUX_ROOM_SCHEMA_VERSION=1
 TMUX_ROOM_FLEET_SCHEMA="tmux-room.fleet"
@@ -93,6 +94,18 @@ Client registry:
   ~/.config/tmux-room/clients     Optional slug /path lines
   ~/.config/tmux-room/launch      Last client, agent, and per-client defaults
   ~/.config/tmux-room/favorites   Extra favorite ids or slugs, one per line
+  ~/.config/tmux-room/emoji       Client/project emoji, "<prefix> <emoji>" per line
+
+Emoji map:
+  Rooms are shown with the emoji of the client or project they belong to.
+  A line matches when the room name equals the prefix, or starts with it and
+  the next character is not a letter or digit.
+
+    natural-catch  🐟      # natural-catch-pdp  -> 🐟 natural-catch-pdp
+    propfirms      📈      # propfirms-arrows   -> 📈 propfirms-arrows
+
+  The emoji is display only. Attach, search, and --json always use the real
+  room name.
   TMUX_ROOM_CODE_DIR              Extra git folders to offer (default: ~/code)
 
 Cleanup options:
@@ -1013,10 +1026,51 @@ for row in sorted(rows):
   )
 }
 
+# Emit "prefix<TAB>emoji" lines from the optional emoji map. Invalid lines are
+# skipped rather than failing the render, so a typo never blocks the picker.
+emoji_map_payload() {
+  [[ -r "$TMUX_ROOM_EMOJI_FILE" ]] || return 0
+  TMUX_ROOM_EMOJI_FILE="$TMUX_ROOM_EMOJI_FILE" python3 -c '
+import os
+import sys
+import unicodedata
+
+path = os.environ["TMUX_ROOM_EMOJI_FILE"]
+try:
+    raw = open(path, encoding="utf-8", errors="ignore").read()
+except OSError:
+    sys.exit(0)
+
+out = []
+for line in raw.splitlines()[:512]:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split(None, 1)
+    if len(parts) != 2:
+        continue
+    key, glyph = parts[0].strip().casefold(), parts[1].strip()
+    if not key or len(key) > 64:
+        continue
+    if any(ch.isspace() for ch in key):
+        continue
+    glyph = "".join(
+        ch for ch in glyph
+        if ch.isprintable() and not unicodedata.category(ch).startswith("C")
+    )
+    if not glyph or len(glyph) > 8:
+        continue
+    out.append(key + "\t" + glyph)
+
+sys.stdout.write("\n".join(out))
+' 2>/dev/null || true
+}
+
 render_view_table() {
   local mode="$1" selected="$2" header="$3" subheader="$4" controls="$5" query="$6"
-  local width i index target selected_flag
+  local width i index target selected_flag emoji_map
   width=$(terminal_columns)
+  emoji_map=$(emoji_map_payload)
   {
     if [[ "$mode" == "fleet" ]]; then
       for i in "${!fleet_unavailable_names[@]}"; do
@@ -1035,7 +1089,8 @@ render_view_table() {
     done
   } | TMUX_ROOM_RENDER_WIDTH="$width" TMUX_ROOM_RENDER_HEADER="$header" \
       TMUX_ROOM_RENDER_SUBHEADER="$subheader" TMUX_ROOM_RENDER_CONTROLS="$controls" \
-      TMUX_ROOM_RENDER_QUERY="$query" TMUX_ROOM_RENDER_MODE="$mode" python3 -c '
+      TMUX_ROOM_RENDER_QUERY="$query" TMUX_ROOM_RENDER_MODE="$mode" \
+      TMUX_ROOM_RENDER_EMOJI="$emoji_map" python3 -c '
 from datetime import datetime
 import os
 import sys
@@ -1047,10 +1102,21 @@ mode = os.environ.get("TMUX_ROOM_RENDER_MODE", "local")
 def clean(value):
     return "".join(ch for ch in str(value or "") if ch.isprintable() and not unicodedata.category(ch).startswith("C"))
 
+ZERO_WIDTH = frozenset(
+    [0x200D, 0x20E3]
+    + list(range(0xFE00, 0xFE10))
+    + list(range(0x1F3FB, 0x1F400))
+)
+
 def char_width(ch):
-    if unicodedata.combining(ch):
+    if unicodedata.combining(ch) or ord(ch) in ZERO_WIDTH:
         return 0
-    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    # Emoji outside the CJK ranges still render double-wide in terminals.
+    if 0x1F300 <= ord(ch) <= 0x1FAFF or 0x2600 <= ord(ch) <= 0x27BF:
+        return 2
+    return 1
 
 def cell_width(value):
     return sum(char_width(ch) for ch in clean(value))
@@ -1095,6 +1161,24 @@ if query:
 if header or subheader or controls or query:
     line()
 
+# prefix -> glyph, longest key first so "beat-buddies" beats "beat".
+emoji_rules = []
+for entry in os.environ.get("TMUX_ROOM_RENDER_EMOJI", "").split("\n"):
+    key, sep, glyph = entry.partition("\t")
+    if sep and key and glyph:
+        emoji_rules.append((key, glyph))
+emoji_rules.sort(key=lambda item: len(item[0]), reverse=True)
+
+def decorate(name):
+    """Prefix a room name with its client glyph. Display only - never the real name."""
+    if not emoji_rules:
+        return name
+    low = name.casefold()
+    for key, glyph in emoji_rules:
+        if low == key or (low.startswith(key) and not low[len(key)].isalnum()):
+            return glyph + " " + name
+    return name
+
 rows = []
 statuses = []
 for raw in sys.stdin:
@@ -1118,14 +1202,16 @@ for raw in sys.stdin:
         active = datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M") if stamp else "unknown"
     except (OverflowError, OSError, ValueError):
         active = "unknown"
-    rows.append((number, selected == "1", pin, clean(device), clean(target), clean(driver), clean(state), clean(windows), active, clean(note)))
+    rows.append((number, selected == "1", pin, clean(device), decorate(clean(target)), clean(driver), clean(state), clean(windows), active, clean(note)))
 
 def server_label(device):
     low = device.casefold()
-    if low in ("devbox", "note-devbox"):
+    if low in ("devbox", "note-devbox", "dev"):
         return "🟩 dev"
     if low in ("mac-mini", "mini", "elliots-mac-mini"):
         return "🍎 mini"
+    if low in ("macbook", "mbp", "elliots-macbook-pro", "macbook-pro"):
+        return "💻 mbp"
     return "🖥 " + device
 
 if statuses:
@@ -2763,7 +2849,7 @@ print_all_devices() {
     fi
     [[ "$label" == "$(get_device_label)" ]] && continue
     echo
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=6 "$target" \
+    if ! ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$target" \
       /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" "TMUX_ROOM_DEVICE=$label" TMUX_ROOM_SOURCE_LABEL=remote tmux-room --list; then
       echo "DEVICE: $label [unreachable]"
     fi
