@@ -1645,7 +1645,7 @@ EMOJI_FILE="$MOCK/emoji-map"
 cat > "$EMOJI_FILE" <<'EMOJI'
 # comment line is ignored
 natural-catch  🐟
-airline        ✈
+airline        ✈   # a trailing inline comment must not join the glyph
    
 bad-line-without-glyph
 EMOJI

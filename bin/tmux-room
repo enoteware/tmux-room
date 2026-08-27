@@ -1032,6 +1032,7 @@ emoji_map_payload() {
   [[ -r "$TMUX_ROOM_EMOJI_FILE" ]] || return 0
   TMUX_ROOM_EMOJI_FILE="$TMUX_ROOM_EMOJI_FILE" python3 -c '
 import os
+import re
 import sys
 import unicodedata
 
@@ -1054,6 +1055,9 @@ for line in raw.splitlines()[:512]:
         continue
     if any(ch.isspace() for ch in key):
         continue
+    # Drop a trailing inline comment. The "#" must be preceded by whitespace so
+    # the keycap emoji "#\ufe0f\u20e3" survives as a glyph in its own right.
+    glyph = re.split(r"\s#", glyph, maxsplit=1)[0].strip()
     glyph = "".join(
         ch for ch in glyph
         if ch.isprintable() and not unicodedata.category(ch).startswith("C")

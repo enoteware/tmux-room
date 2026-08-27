@@ -113,7 +113,7 @@ List rooms across the local device and configured hosts:
 tmux-room --all
 ```
 
-Each device needs its own `hosts` file listing the *other* devices, and each needs `tmux-room` installed, since remote inventory is collected by running `tmux-room --json` over SSH.
+Each device needs its own `hosts` file listing the *other* devices, and each needs `tmux-room` installed: remote inventory is collected by running `tmux-room` on the destination over SSH. `--all` runs `--list` there and prints the result; `--fleet` runs `--json` and merges it into one table.
 
 `--all` keeps the original sequential device tables. For one responsive table and a shared search across every reachable device, use:
 
