@@ -70,13 +70,14 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 
 bash -n "$SCRIPT"
 bash -n "$ROOT/install.sh"
-[[ "$($SCRIPT --version)" == "tmux-room 0.6.0" ]] || fail "version should be 0.6.0"
+[[ "$($SCRIPT --version)" == "tmux-room 0.7.0" ]] || fail "version should be 0.7.0"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"
 assert_contains "$help" "--fleet-json"
 assert_contains "$help" "device:room"
 assert_contains "$help" "--kill"
+assert_contains "$help" "close the highlighted room"
 assert_contains "$help" "--json"
 assert_contains "$help" "--inspect"
 assert_contains "$help" "--metadata"
@@ -486,7 +487,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'TMUX_ROOM_VERSION="broken"' '(' > "$INVALID
 cp "$SCRIPT" "$UPDATE_DIR/invalid-copy"
 invalid_update_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" "$UPDATE_DIR/invalid-copy" --update 2>&1 || true)
 assert_contains "$invalid_update_output" "syntax error"
-[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.6.0" ]] || fail "invalid update replaced the installed copy"
+[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.7.0" ]] || fail "invalid update replaced the installed copy"
 
 invalid_install_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" 2>&1 || true)
@@ -498,11 +499,11 @@ MISSING_VERSION="$UPDATE_DIR/missing-version"
 printf '%s\n' '#!/usr/bin/env bash' 'echo missing' > "$MISSING_VERSION"
 cp "$SCRIPT" "$UPDATE_DIR/missing-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$MISSING_VERSION" "$UPDATE_DIR/missing-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.6.0" ]] || fail "versionless update replaced the installed copy"
+[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.7.0" ]] || fail "versionless update replaced the installed copy"
 
 cp "$SCRIPT" "$UPDATE_DIR/download-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 "$UPDATE_DIR/download-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.6.0" ]] || fail "failed download replaced the installed copy"
+[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.7.0" ]] || fail "failed download replaced the installed copy"
 
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" >/dev/null 2>&1 || true
@@ -1298,6 +1299,68 @@ fleet_attach_return_output=$(printf '/remote-review\n\ny\nq' | PATH="$MOCK:/usr/
 assert_contains "$(<"$SSH_LOG")" "-t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --attach-id 9 remote-review"
 fleet_screen_count=$(printf '%s' "$fleet_attach_return_output" | /usr/bin/python3 -c 'import sys; text=sys.stdin.read(); marker="Attaching to remote-review on mini."; print(text.split(marker,1)[1].count("FLEET:") if marker in text else 0)')
 ((fleet_screen_count >= 1)) || fail "fleet picker did not return after attached room exited"
+
+# --- fleet picker close key ---
+
+# The hint line has to advertise the key, or nobody finds it.
+assert_contains "$local_fleet_picker_output" "x close"
+
+# A local room closes through the same two confirmations as --kill.
+: > "$TMUX_LOG"
+fleet_close_local=$(printf '/alpha\nxalpha\nKILL\n\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet 2>&1)
+# bash suppresses a read -p prompt when stdin is a pipe, so the confirmations
+# are proven by what each answer does, not by the prompt text.
+assert_contains "$fleet_close_local" "WARNING: Killing this room"
+assert_contains "$fleet_close_local" "Killed room: alpha"
+assert_contains "$(<"$TMUX_LOG")" "kill-session -t $MOCK_ID_1"
+# The snapshot is stale after a kill, so the picker must collect the fleet again.
+fleet_reload_count=$(printf '%s' "$fleet_close_local" | /usr/bin/python3 -c 'import sys; text=sys.stdin.read(); marker="Killed room: alpha"; print(text.split(marker,1)[1].count("FLEET:") if marker in text else 0)')
+((fleet_reload_count >= 1)) || fail "fleet picker did not reload after closing a local room"
+
+# A wrong first answer cancels and never reaches tmux.
+: > "$TMUX_LOG"
+fleet_close_cancel=$(printf '/alpha\nxwrong-name\n\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet 2>&1)
+assert_contains "$fleet_close_cancel" "Kill cancelled"
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+# The right room name alone is not enough; the second answer must be KILL.
+: > "$TMUX_LOG"
+fleet_close_half=$(printf '/alpha\nxalpha\nNO\n\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet 2>&1)
+assert_contains "$fleet_close_half" "Kill cancelled"
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+# A protected room refuses the key outright.
+: > "$TMUX_LOG"
+fleet_close_protected=$(printf '/alpha\nx\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_META_PROTECTED=1 \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet 2>&1)
+assert_contains "$fleet_close_protected" "Kill refused: room is protected"
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+# A remote room hands both confirmations to the device that owns it.
+: > "$SSH_LOG"
+fleet_close_remote=$(printf '/remote-review\nx\nq' | PATH="$MOCK:/usr/bin:/bin" SSH_MOCK_LOG="$SSH_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
+assert_contains "$fleet_close_remote" "Both confirmations are asked by mini"
+# The immutable ID travels with the name, so a replacement room cannot be hit,
+# and a dead host cannot hang the picker.
+assert_contains "$(<"$SSH_LOG")" "-t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --kill-id 9 remote-review"
+
+# --kill-id refuses when the name now belongs to a different session.
+: > "$TMUX_LOG"
+kill_id_mismatch=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill-id 999 alpha 2>&1 || true)
+assert_contains "$kill_id_mismatch" "Kill aborted: room identity changed after selection"
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+kill_id_bad_args=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill-id notanumber alpha 2>&1 || true)
+assert_contains "$kill_id_bad_args" "Invalid room identity"
 
 : > "$TMUX_LOG"
 protected_kill_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_META_PROTECTED="${ESC}1${BIDI}" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)
