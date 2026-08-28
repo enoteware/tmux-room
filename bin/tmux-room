@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.7.0"
+TMUX_ROOM_VERSION="0.7.1"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
@@ -3486,6 +3486,7 @@ fleet_picker() {
     else
       status="All configured devices are reachable."
     fi
+    [[ -z "${update_notice:-}" ]] || status="$status | $(sanitize_text "$update_notice")"
     printf '\033[H'
     render_view_table fleet "$selected" "FLEET: $summary" "STATUS: $status" \
       "/ search | c clear | arrows move | Enter inspect/attach | x close | q quit" "$query"
@@ -3554,6 +3555,12 @@ run_fleet() {
   local summary status rc picker_rc
   trap cleanup_fleet_temp_files EXIT
   trap 'cleanup_fleet_temp_files; exit 130' HUP INT TERM
+  # A configured host registry makes this the default command, so the update
+  # notice has to appear here too, not only in the local picker. Checked once,
+  # outside the loop, so a reload does not re-run it.
+  if [[ -t 0 && -t 1 || "${TMUX_ROOM_FORCE_ARROW:-0}" == "1" ]]; then
+    update_notice=$(check_for_update)
+  fi
   # Closing a room invalidates the snapshot, so the picker asks for a fresh
   # collection instead of redrawing a table that still lists a dead room.
   while true; do
