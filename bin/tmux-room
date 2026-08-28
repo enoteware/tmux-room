@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-TMUX_ROOM_VERSION="0.6.0"
+TMUX_ROOM_VERSION="0.7.0"
 TMUX_ROOM_RAW_URL="${TMUX_ROOM_RAW_URL:-https://raw.githubusercontent.com/enoteware/tmux-room/main/bin/tmux-room}"
 TMUX_ROOM_CONFIG_DIR="${TMUX_ROOM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-room}"
 TMUX_ROOM_HOSTS_FILE="${TMUX_ROOM_HOSTS_FILE:-$TMUX_ROOM_CONFIG_DIR/hosts}"
 TMUX_ROOM_EMOJI_FILE="${TMUX_ROOM_EMOJI_FILE:-$TMUX_ROOM_CONFIG_DIR/emoji}"
+# Exit code fleet_picker uses to ask run_fleet for a fresh inventory.
+FLEET_PICKER_RELOAD=90
 TMUX_ROOM_SCHEMA="tmux-room.inventory"
 TMUX_ROOM_SCHEMA_VERSION=1
 TMUX_ROOM_FLEET_SCHEMA="tmux-room.fleet"
@@ -60,7 +62,11 @@ Format (one device per line):
 
 Set a friendly local name in ~/.config/tmux-room/device or TMUX_ROOM_DEVICE.
 Detach from tmux with Ctrl-b then d.
-In interactive pickers, press / to search and c to clear the search.
+In interactive pickers, press / to search, c to clear the search, and x to
+close the highlighted room. Closing always asks for two confirmations: the
+exact room name, then the word KILL. A room on another device is confirmed on
+that device. Protect a room with --metadata <room> --protected to refuse x
+entirely.
 
 Metadata options for --new and --metadata:
   --driver <name>                 Set the provider-neutral room driver
@@ -3432,6 +3438,29 @@ fleet_attach_index() {
   return $?
 }
 
+fleet_kill_index() {
+  local index="$1" source device room session_id remote
+  source="${view_sources[index]}"
+  device="${view_devices[index]}"
+  room="${view_raw_names[index]}"
+  session_id="${view_ids[index]}"
+  [[ "${view_action_safe[index]}" == "1" ]] || { echo "This room name is display-only and cannot be used as a termination target." >&2; return 2; }
+  if [[ "$source" == "local" ]]; then
+    kill_local_room "$room" "$session_id"
+    return $?
+  fi
+  if ! valid_device_label "$device" || ! valid_portable_room_name "$room"; then
+    echo "Invalid remote room identity." >&2
+    return 2
+  fi
+  remote=$(lookup_host "$device") || { echo "Device is no longer configured: $device" >&2; return 1; }
+  command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote termination." >&2; return 127; }
+  # The destination host owns the room, so it also owns both confirmations.
+  echo "Killing $room on $device. Both confirmations are asked by $device."
+  ssh -t "$remote" /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room --kill "$room"
+  return $?
+}
+
 fleet_picker() {
   local selected=0 query="" key rest index attach_choice summary status
   while true; do
@@ -3449,7 +3478,7 @@ fleet_picker() {
     fi
     printf '\033[H'
     render_view_table fleet "$selected" "FLEET: $summary" "STATUS: $status" \
-      "/ search | c clear | arrows move | Enter inspect/attach | q quit" "$query"
+      "/ search | c clear | arrows move | Enter inspect/attach | x close | q quit" "$query"
     printf '\033[J'
     IFS= read -rsn1 key || return 1
     if [[ "$key" == $'\033' ]]; then
@@ -3475,6 +3504,17 @@ fleet_picker() {
         selected=0
         ;;
       c|C) query=""; selected=0 ;;
+      x|X)
+        ((${#view_order[@]} > 0)) || continue
+        index="${view_order[selected]}"
+        printf '\033[0m\n'
+        fleet_kill_index "$index" || true
+        echo
+        printf 'Press Enter to reload the fleet: '
+        read -r rest || true
+        # The snapshot is stale once a room is gone, so ask for a fresh collection.
+        return "$FLEET_PICKER_RELOAD"
+        ;;
       '')
         ((${#view_order[@]} > 0)) || continue
         index="${view_order[selected]}"
@@ -3501,29 +3541,33 @@ fleet_picker() {
 }
 
 run_fleet() {
-  local summary status rc
-  fleet_tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-room-fleet.XXXXXX")
+  local summary status rc picker_rc
   trap cleanup_fleet_temp_files EXIT
   trap 'cleanup_fleet_temp_files; exit 130' HUP INT TERM
-  rc=0
-  print_fleet_json > "$fleet_tmp" || rc=$?
-  if ((rc != 0)); then
+  # Closing a room invalidates the snapshot, so the picker asks for a fresh
+  # collection instead of redrawing a table that still lists a dead room.
+  while true; do
+    fleet_tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-room-fleet.XXXXXX")
+    rc=0
+    print_fleet_json > "$fleet_tmp" || rc=$?
+    if ((rc != 0)); then
+      rm -f "$fleet_tmp"
+      fleet_tmp=""
+      return "$rc"
+    fi
+    load_fleet_view "$fleet_tmp" || {
+      rm -f "$fleet_tmp"
+      fleet_tmp=""
+      echo "Unable to read the fleet inventory." >&2
+      return 1
+    }
     rm -f "$fleet_tmp"
     fleet_tmp=""
-    return "$rc"
-  fi
-  load_fleet_view "$fleet_tmp" || {
-    rm -f "$fleet_tmp"
-    fleet_tmp=""
-    echo "Unable to read the fleet inventory." >&2
-    return 1
-  }
-  rm -f "$fleet_tmp"
-  fleet_tmp=""
-  if [[ -t 0 && -t 1 || "${TMUX_ROOM_FORCE_ARROW:-0}" == "1" ]]; then
-    fleet_picker
-    return $?
-  fi
+    [[ -t 0 && -t 1 || "${TMUX_ROOM_FORCE_ARROW:-0}" == "1" ]] || break
+    picker_rc=0
+    fleet_picker || picker_rc=$?
+    ((picker_rc == FLEET_PICKER_RELOAD)) || return "$picker_rc"
+  done
   build_visible_order ""
   summary="$fleet_devices devices, $fleet_reachable reachable, $fleet_unavailable unavailable"
   if ((fleet_unavailable > 0)); then
@@ -3636,7 +3680,11 @@ arrow_picker() {
           target="${view_raw_names[index]}"
           selected_session_id="${view_ids[index]}"
           printf '\033[0m\n'
-          kill_local_room "$target" "$selected_session_id"
+          kill_local_room "$target" "$selected_session_id" || true
+          echo
+          # Pause before the redraw, otherwise the result scrolls away unread.
+          printf 'Press Enter to reload the room list: '
+          read -r rest || true
           break
           ;;
         '')
