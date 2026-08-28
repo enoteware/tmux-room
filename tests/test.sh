@@ -70,7 +70,7 @@ if "SEARCH:" in screen or first not in screen or second not in screen:
 
 bash -n "$SCRIPT"
 bash -n "$ROOT/install.sh"
-[[ "$($SCRIPT --version)" == "tmux-room 0.7.0" ]] || fail "version should be 0.7.0"
+[[ "$($SCRIPT --version)" == "tmux-room 0.7.1" ]] || fail "version should be 0.7.1"
 help=$($SCRIPT --help)
 assert_contains "$help" "--all"
 assert_contains "$help" "--fleet"
@@ -487,7 +487,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'TMUX_ROOM_VERSION="broken"' '(' > "$INVALID
 cp "$SCRIPT" "$UPDATE_DIR/invalid-copy"
 invalid_update_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" "$UPDATE_DIR/invalid-copy" --update 2>&1 || true)
 assert_contains "$invalid_update_output" "syntax error"
-[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.7.0" ]] || fail "invalid update replaced the installed copy"
+[[ "$("$UPDATE_DIR/invalid-copy" --version)" == "tmux-room 0.7.1" ]] || fail "invalid update replaced the installed copy"
 
 invalid_install_output=$(PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$INVALID_UPDATE" \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" 2>&1 || true)
@@ -499,11 +499,11 @@ MISSING_VERSION="$UPDATE_DIR/missing-version"
 printf '%s\n' '#!/usr/bin/env bash' 'echo missing' > "$MISSING_VERSION"
 cp "$SCRIPT" "$UPDATE_DIR/missing-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$MISSING_VERSION" "$UPDATE_DIR/missing-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.7.0" ]] || fail "versionless update replaced the installed copy"
+[[ "$("$UPDATE_DIR/missing-copy" --version)" == "tmux-room 0.7.1" ]] || fail "versionless update replaced the installed copy"
 
 cp "$SCRIPT" "$UPDATE_DIR/download-copy"
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 "$UPDATE_DIR/download-copy" --update >/dev/null 2>&1 || true
-[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.7.0" ]] || fail "failed download replaced the installed copy"
+[[ "$("$UPDATE_DIR/download-copy" --version)" == "tmux-room 0.7.1" ]] || fail "failed download replaced the installed copy"
 
 PATH="$MOCK:/usr/bin:/bin" CURL_UPDATE_PAYLOAD="$UPDATE_PAYLOAD" CURL_UPDATE_FAIL=1 \
   TMUX_ROOM_INSTALL_DIR="$INSTALL_DIR" bash "$ROOT/install.sh" >/dev/null 2>&1 || true
@@ -1304,6 +1304,23 @@ fleet_screen_count=$(printf '%s' "$fleet_attach_return_output" | /usr/bin/python
 
 # The hint line has to advertise the key, or nobody finds it.
 assert_contains "$local_fleet_picker_output" "x close"
+
+# A configured host registry makes the fleet picker the default command, so the
+# update notice has to reach it too. It never did before 0.7.1.
+rm -f "$TMUX_ROOM_CONFIG_DIR/update-check"
+fleet_update_output=$(printf 'q' | PATH="$MOCK:/usr/bin:/bin" CURL_MOCK_LOG="$CURL_LOG" \
+  TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=120 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
+assert_contains "$fleet_update_output" "UPDATE: v9.9.9 available"
+assert_contains "$fleet_update_output" "configured devices need attention. | UPDATE:"
+
+# The non-interactive table stays clean; the notice belongs in the picker.
+rm -f "$TMUX_ROOM_CONFIG_DIR/update-check"
+fleet_update_table=$(PATH="$MOCK:/usr/bin:/bin" CURL_MOCK_LOG="$CURL_LOG" \
+  TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=120 \
+  TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
+assert_not_contains "$fleet_update_table" "UPDATE: v9.9.9"
+rm -f "$TMUX_ROOM_CONFIG_DIR/update-check"
 
 # A local room closes through the same two confirmations as --kill.
 : > "$TMUX_LOG"

@@ -121,7 +121,7 @@ Each device needs its own `hosts` file listing the *other* devices, and each nee
 tmux-room --fleet
 ```
 
-In an interactive terminal, `/` searches device, room, driver, state, note, and path. `Enter` inspects the selected immutable room identity, then asks before attaching. `x` closes the selected room through the double-confirmation flow described in [Safe room termination](#safe-room-termination); a room on another device is confirmed on that device over SSH. Closing a room makes the snapshot stale, so the picker collects a fresh inventory before it redraws. Without an interactive terminal, the same command prints a compact table. Every unreachable, unsupported, or invalid device gets its own status row, including on narrow terminals.
+In an interactive terminal, the status line carries an update notice when a newer GitHub release exists, `/` searches device, room, driver, state, note, and path. `Enter` inspects the selected immutable room identity, then asks before attaching. `x` closes the selected room through the double-confirmation flow described in [Safe room termination](#safe-room-termination); a room on another device is confirmed on that device over SSH. Closing a room makes the snapshot stale, so the picker collects a fresh inventory before it redraws. Without an interactive terminal, the same command prints a compact table. Every unreachable, unsupported, or invalid device gets its own status row, including on narrow terminals.
 
 Attach through the registry:
 
