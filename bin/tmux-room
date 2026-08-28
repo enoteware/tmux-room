@@ -3439,7 +3439,7 @@ fleet_attach_index() {
 }
 
 fleet_kill_index() {
-  local index="$1" source device room session_id remote
+  local index="$1" source device room session_id remote digits rc
   source="${view_sources[index]}"
   device="${view_devices[index]}"
   room="${view_raw_names[index]}"
@@ -3449,16 +3449,26 @@ fleet_kill_index() {
     kill_local_room "$room" "$session_id"
     return $?
   fi
-  if ! valid_device_label "$device" || ! valid_portable_room_name "$room"; then
+  if ! valid_device_label "$device" || ! valid_portable_room_name "$room" || [[ ! "$session_id" =~ ^\$[0-9]+$ ]]; then
     echo "Invalid remote room identity." >&2
     return 2
   fi
   remote=$(lookup_host "$device") || { echo "Device is no longer configured: $device" >&2; return 1; }
   command -v ssh >/dev/null 2>&1 || { echo "tmux-room requires ssh for remote termination." >&2; return 127; }
-  # The destination host owns the room, so it also owns both confirmations.
+  digits="${session_id#\$}"
+  # The destination host owns the room, so it also owns both confirmations. It is
+  # given the immutable ID as well as the name, so a replacement room reusing the
+  # name cannot be killed by a stale selection.
   echo "Killing $room on $device. Both confirmations are asked by $device."
-  ssh -t "$remote" /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room --kill "$room"
-  return $?
+  rc=0
+  ssh -t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 "$remote" \
+    /usr/bin/env "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" tmux-room --kill-id "$digits" "$room" || rc=$?
+  # --kill-id landed in 0.7.0. An older destination rejects it as an invalid
+  # room, which reads like a bug rather than a version gap.
+  if ((rc == 2)); then
+    echo "If $device called the room invalid, it may be running a tmux-room older than 0.7.0. Run tmux-room --update on $device." >&2
+  fi
+  return "$rc"
 }
 
 fleet_picker() {
@@ -3726,7 +3736,7 @@ fi
 
 # Fleet actions pass the immutable tmux ID separately from the portable name.
 # The numeric form prevents an SSH client shell from expanding a leading dollar sign.
-if [[ "${1:-}" == "--inspect-id" || "${1:-}" == "--attach-id" ]]; then
+if [[ "${1:-}" == "--inspect-id" || "${1:-}" == "--attach-id" || "${1:-}" == "--kill-id" ]]; then
   if [[ $# -ne 3 || ! "$2" =~ ^[0-9]+$ ]] || ! valid_portable_room_name "$3"; then
     echo "Invalid room identity." >&2
     exit 2
@@ -3735,6 +3745,10 @@ if [[ "${1:-}" == "--inspect-id" || "${1:-}" == "--attach-id" ]]; then
   selected_session_id="\$$2"
   if [[ "$1" == "--inspect-id" ]]; then
     inspect_local_room "$3" "$selected_session_id"
+    exit $?
+  fi
+  if [[ "$1" == "--kill-id" ]]; then
+    kill_local_room "$3" "$selected_session_id"
     exit $?
   fi
   if ! revalidate_session "$selected_session_id" "$3"; then

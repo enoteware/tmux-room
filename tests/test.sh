@@ -1349,7 +1349,18 @@ fleet_close_remote=$(printf '/remote-review\nx\nq' | PATH="$MOCK:/usr/bin:/bin" 
   TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_REMOTE_MAX_BYTES=1024 TMUX_ROOM_COLUMNS=80 \
   TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet)
 assert_contains "$fleet_close_remote" "Both confirmations are asked by mini"
-assert_contains "$(<"$SSH_LOG")" "-t mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --kill remote-review"
+# The immutable ID travels with the name, so a replacement room cannot be hit,
+# and a dead host cannot hang the picker.
+assert_contains "$(<"$SSH_LOG")" "-t -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 mini-host /usr/bin/env $REMOTE_PATH_ASSIGNMENT tmux-room --kill-id 9 remote-review"
+
+# --kill-id refuses when the name now belongs to a different session.
+: > "$TMUX_LOG"
+kill_id_mismatch=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill-id 999 alpha 2>&1 || true)
+assert_contains "$kill_id_mismatch" "Kill aborted: room identity changed after selection"
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+kill_id_bad_args=$(PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill-id notanumber alpha 2>&1 || true)
+assert_contains "$kill_id_bad_args" "Invalid room identity"
 
 : > "$TMUX_LOG"
 protected_kill_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_META_PROTECTED="${ESC}1${BIDI}" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --kill alpha 2>&1 || true)

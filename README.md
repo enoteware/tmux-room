@@ -352,7 +352,7 @@ Termination requires both:
 1. Type the exact room name.
 2. Type the uppercase word `KILL`.
 
-The same two confirmations run behind the `x` key in both interactive pickers, so there is no faster path to killing a room. In the fleet picker, `x` on a remote row opens an SSH session and the destination device asks for both confirmations itself.
+The same two confirmations run behind the `x` key in both interactive pickers, so there is no faster path to killing a room. In the fleet picker, `x` on a remote row opens an SSH session and the destination device asks for both confirmations itself. The immutable tmux `#{session_id}` travels with the room name, so a replacement room that reused the name is not killed by a stale selection. This requires tmux-room 0.7.0 or newer on the destination device.
 
 The inspected tmux `#{session_id}` is captured before confirmation and revalidated immediately before termination. Guard reads fail closed. A final tmux-side predicate requires the immutable ID and a false protected option. Only its true branch queues the kill. A replacement room reusing the same name is not killed. A final best-effort process/RSS snapshot is also taken immediately before the command. tmux may not terminate detached, daemonized, reparented, or signal-ignoring descendants. Model context usage is displayed only when it can be read safely and reliably; otherwise the UI says `CONTEXT: unavailable`.
 
