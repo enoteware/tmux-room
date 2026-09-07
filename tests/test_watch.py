@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Focused safety, layout, and terminal integration checks for the watch view."""
+import curses
 import errno
 import fcntl
 import json
@@ -143,6 +144,46 @@ class WatchTests(unittest.TestCase):
         self.assertEqual([room["name"] for room in result], ["help", "broken"])
         self.assertEqual([room["name"] for room in self.watch["filtered"](rooms, "DEVBOX", False)], ["help"])
 
+    def test_swap_order_survives_inventory_refresh(self):
+        rooms = [dict(room_record(name, "$" + str(index)), source="local", device="mini")
+                 for index, name in enumerate(("alpha", "beta", "gamma"), 1)]
+        room_key = self.watch["key"]
+        swapped = self.watch["swap_rooms"](rooms, room_key(rooms[0]), room_key(rooms[2]))
+        self.assertEqual([room["name"] for room in swapped], ["gamma", "beta", "alpha"])
+        self.assertEqual([room["name"] for room in rooms], ["alpha", "beta", "gamma"])
+        refreshed, order = self.watch["ordered_rooms"](rooms, [room_key(room) for room in swapped])
+        self.assertEqual([room["name"] for room in refreshed], ["gamma", "beta", "alpha"])
+        new_room = dict(room_record("delta", "$4"), source="local", device="mini")
+        refreshed, order = self.watch["ordered_rooms"](rooms[1:] + [new_room], order)
+        self.assertEqual([room["name"] for room in refreshed], ["gamma", "beta", "delta"])
+        self.assertEqual(order, [room_key(room) for room in refreshed])
+        self.assertEqual(self.watch["swap_rooms"](rooms, room_key(new_room), room_key(rooms[0])), rooms)
+
+    def test_palette_honors_no_color_and_dumb_terminal(self):
+        for environment in ({"NO_COLOR": ""}, {"TERM": "dumb"}):
+            with self.subTest(environment=environment), mock.patch.dict(os.environ, environment), \
+                    mock.patch("curses.start_color") as start:
+                styles = self.watch["palette"]()
+                self.assertEqual(styles["selected"], curses.A_REVERSE | curses.A_BOLD)
+                self.assertTrue(styles["needs_input"] & curses.A_BOLD)
+                start.assert_not_called()
+
+    def test_palette_uses_explicit_contrasting_backgrounds(self):
+        environment = {name: value for name, value in os.environ.items() if name != "NO_COLOR"}
+        environment["TERM"] = "xterm-256color"
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch("curses.has_colors", return_value=True), \
+                mock.patch("curses.start_color"), mock.patch("curses.init_pair") as pairs, \
+                mock.patch("curses.color_pair", side_effect=lambda number: number << 8):
+            styles = self.watch["palette"]()
+        configured = [call.args[1:] for call in pairs.call_args_list]
+        for pair in ((curses.COLOR_BLACK, curses.COLOR_CYAN),
+                     (curses.COLOR_BLACK, curses.COLOR_YELLOW),
+                     (curses.COLOR_BLACK, curses.COLOR_GREEN),
+                     (curses.COLOR_WHITE, curses.COLOR_RED)):
+            self.assertIn(pair, configured)
+        self.assertNotEqual(styles["failed"], styles["running"])
+
     def test_capture_rejects_replaced_session(self):
         with mock.patch.object(sys, "argv", ["capture", "$1", "alpha", "10"]), \
                 mock.patch("subprocess.check_output", side_effect=[b"$1|alpha|%4\n", b"old output\n", b"$2|alpha|%9\n"]):
@@ -213,6 +254,12 @@ class WatchTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2)
 
     def test_pty_launch_resize_and_quit(self):
+        self.run_pty_view(swap=False)
+
+    def test_pty_swap_search_resize_and_return_to_rooms(self):
+        self.run_pty_view(swap=True)
+
+    def run_pty_view(self, swap):
         with tempfile.TemporaryDirectory(prefix="tmux-room-watch-test-") as temporary:
             base = Path(temporary)
             inventory = base / "fleet.json"
@@ -253,7 +300,24 @@ class WatchTests(unittest.TestCase):
                     os.write(master, b"c")
                     read_until(master, process, lambda data: b"WATCH" in data)
                     self.assertIsNone(process.poll(), "dashboard exited on resize")
-                os.write(master, b"q")
+                if swap:
+                    for columns, rows in ((40, 12), (80, 24)):
+                        set_terminal_size(master, columns, rows)
+                        os.kill(process.pid, signal.SIGWINCH)
+                        os.write(master, b"s")
+                        read_until(master, process, lambda data: b"SWAP ROOM" in data)
+                        os.write(master, b"beta")
+                        # Curses emits changed cells, so the query arrives one letter at a time.
+                        read_until(master, process, lambda data: b"a_" in data)
+                        os.write(master, b"\n")
+                        read_until(master, process, lambda data: b"REVIEW_MARKER" in data)
+                        os.write(master, b"s")
+                        read_until(master, process, lambda data: b"SWAP ROOM" in data)
+                        os.write(master, b"alpha\n")
+                        read_until(master, process, lambda data: b"REVIEW_MARKER" in data)
+                    os.write(master, b"g")
+                else:
+                    os.write(master, b"q")
                 deadline = time.monotonic() + 4
                 while process.poll() is None and time.monotonic() < deadline:
                     if select.select([master], [], [], 0.1)[0]:
@@ -262,7 +326,7 @@ class WatchTests(unittest.TestCase):
                         except OSError as error:
                             if error.errno != errno.EIO:
                                 raise
-                self.assertEqual(process.poll(), 0, "watch did not quit promptly")
+                self.assertEqual(process.poll(), 91 if swap else 0, "watch did not leave promptly")
                 logged = capture_log.read_text()
                 self.assertIn("capture-pane", logged)
                 for mutation in ("attach-session", "switch-client", "send-keys", "resize-pane", "kill-session"):

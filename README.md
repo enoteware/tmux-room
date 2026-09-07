@@ -6,7 +6,12 @@ Designed for SSH, Tailscale, Mosh, and mobile clients such as Termius.
 
 ## What it shows
 
-The default picker and `--list` stay compact, with one room per row:
+The default picker puts room names first, highlights the selection, and keeps
+keyboard controls at the bottom. Its list scrolls within the terminal height;
+narrow windows use two lines per room. A selected-room detail area appears when
+there is enough space. Press `w` to open the live overview.
+
+`--list` keeps the compact one-row-per-room table:
 
 ```text
 DEVICE: mini [local]
@@ -151,8 +156,18 @@ snapshot of the room's active pane. This explicit view reads terminal contents;
 ordinary inventory and JSON commands remain metadata-only. Previews stay in
 memory and do not attach to, resize, or send input to the source terminals.
 
+Tiles have borders and contrasting status badges. The selected tile has a clear
+highlight. Colors fall back to terminal emphasis when `NO_COLOR` is set or colors
+are unavailable.
+
 Use the arrow keys to select a tile, Enter to confirm attachment, `/` to search,
-`c` to clear the search, `a` to toggle rooms needing attention, and `q` to quit.
+`c` to clear the search, and `a` to toggle rooms needing attention. Press `s` to
+open the room chooser: type to find a room, move with arrows, and press Enter to
+swap it into the selected position. Swaps affect the overview layout only and
+stay in place across inventory refreshes for this view.
+
+Press `g` to return to the room picker. `q` closes the overview, returning to the
+picker when opened with `w`.
 Use Page Up and Page Down to change pages, and `r` to refresh the fleet. Detach from an attached
 room with `Ctrl-b`, then `d`.
 

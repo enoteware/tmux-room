@@ -1787,4 +1787,6 @@ REAL_TMUX_SOCKET=""
 
 python3 "$(dirname "$SCRIPT")/../tests/test_watch.py"
 
+python3 "$ROOT/tests/test_picker.py"
+
 echo "tests passed"
