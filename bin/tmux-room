@@ -35,6 +35,8 @@ Usage:
   tmux-room --list                Show compact local room table
   tmux-room --all                 Show compact local and SSH-device tables
   tmux-room --fleet               Search or print the unified device fleet
+  tmux-room --watch               Live room grid, auto-sized to the terminal
+  tmux-room --god                 Alias for --watch
   tmux-room --fleet-json          Print the versioned aggregate fleet JSON
   tmux-room --all --json          Alias for --fleet-json
   tmux-room --json [room]         Print the versioned local JSON inventory
@@ -358,6 +360,377 @@ except (ValueError, OSError):
     ram = 'RAM unavailable'
 
 print(f'CPU {cpu_pct}% load ({load:.2f}/{cores}) · {ram}')
+PY
+}
+
+run_watch() {
+  command -v python3 >/dev/null 2>&1 || { echo "Watch requires Python 3." >&2; return 127; }
+  [[ -t 0 && -t 1 ]] || { echo "Watch requires an interactive terminal." >&2; return 2; }
+  python3 - "$0" "$TMUX_ROOM_HOSTS_FILE" "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" <<'PY'
+import concurrent.futures
+import curses
+import json
+import math
+import os
+import re
+import selectors
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+import unicodedata
+
+SCRIPT, HOSTS, REMOTE_PATH = sys.argv[1:4]
+STOP = threading.Event()
+ANSI = re.compile(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]')
+
+
+def clean(value):
+    value = ANSI.sub('', str(value))
+    return ''.join(ch for ch in value if not unicodedata.category(ch).startswith('C'))
+
+
+def fit(value, width):
+    """Clip to terminal cells, retaining accents and avoiding split wide glyphs."""
+    result, used = [], 0
+    for ch in clean(value):
+        cells = 0 if unicodedata.combining(ch) else (2 if unicodedata.east_asian_width(ch) in 'WF' else 1)
+        if used + cells > max(0, width):
+            break
+        if cells or result:
+            result.append(ch)
+            used += cells
+    return ''.join(result)
+
+
+def layout(height, width, count):
+    """Use spare space for larger previews; paginate below useful tile sizes."""
+    usable = max(1, height - 4)
+    columns = min(max(1, width // 44), max(1, count), 4)
+    rows = min(max(1, usable // 10), max(1, math.ceil(count / columns)))
+    return columns, rows, columns * rows
+
+
+def hosts():
+    result = {}
+    try:
+        with open(HOSTS, encoding='utf-8') as source:
+            for line in source:
+                fields = line.split()
+                if not fields or fields[0].startswith('#') or len(fields) != 2:
+                    continue
+                name, target = fields
+                if (re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', name)
+                        and not target.startswith('-') and re.fullmatch(r'[A-Za-z0-9._@:-]+', target)):
+                    result.setdefault(name, target)
+    except OSError:
+        pass
+    return result
+
+
+def bounded(argv, timeout=8, limit=262144):
+    """Bound time and bytes, and terminate descendants when the view closes."""
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                if STOP.is_set() or time.monotonic() >= deadline:
+                    raise RuntimeError('capture timed out')
+                if not selector.select(.1):
+                    continue
+                chunk = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > limit:
+                    raise RuntimeError('output exceeded limit')
+        while process.poll() is None:
+            if STOP.wait(.1) or time.monotonic() >= deadline:
+                raise RuntimeError('command timed out')
+        if process.returncode:
+            raise RuntimeError('command unavailable')
+        return data.decode('utf-8', errors='replace')
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        process.stdout.close()
+
+
+# Same identity check locally and remotely. The captured pane is an immutable pane ID.
+# A changed active pane/session invalidates the result rather than showing another room.
+CAPTURE = r'''
+import json, re, subprocess, sys
+sid, name, lines = sys.argv[1:]
+def run(*args):
+    return subprocess.check_output(['tmux'] + list(args), stderr=subprocess.DEVNULL, timeout=3).decode('utf-8', 'replace')
+def identity():
+    return run('display-message', '-p', '-t', sid + ':', '#{session_id}|#{session_name}|#{pane_id}').rstrip('\n')
+if not re.fullmatch(r'\$[0-9]+', sid): raise RuntimeError('invalid session')
+before = identity()
+prefix = sid + '|' + name + '|'
+if not before.startswith(prefix): raise RuntimeError('session identity changed')
+pane = before[len(prefix):]
+if not re.fullmatch(r'%[0-9]+', pane): raise RuntimeError('invalid pane')
+output = run('capture-pane', '-p', '-t', pane, '-S', '-' + str(min(80, max(1, int(lines)))))
+if before != identity(): raise RuntimeError('session identity changed')
+print(json.dumps({'pane': pane, 'text': output}))
+'''
+
+
+def key(room):
+    return room['source'], room['device'], room['id'], room['name']
+
+
+def ssh_args(target):
+    return ['ssh', '-n', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=4',
+            '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=3',
+            '-o', 'ServerAliveCountMax=1', target]
+
+
+def capture(room, lines):
+    args = ['python3', '-c', CAPTURE, room['id'], room['name'], str(lines)]
+    if room['source'] == 'remote':
+        target = hosts().get(room['device'])
+        if not target:
+            raise RuntimeError('device no longer configured')
+        args = ssh_args(target) + ['/usr/bin/env ' + REMOTE_PATH + ' ' + ' '.join(shlex.quote(arg) for arg in args)]
+    value = json.loads(bounded(args))
+    if room['source'] == 'local' and value['pane'] == os.environ.get('TMUX_PANE'):
+        return value['pane'], ['This pane is running the overview.']
+    # Pane data stays in memory and is never used as terminal input or markup.
+    lines = [clean(line.expandtabs(4)) for line in value['text'].splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return value['pane'], lines
+
+
+def inventory():
+    result = json.loads(bounded([SCRIPT, '--fleet-json'], timeout=max(30, min(180, 16 * (len(hosts()) + 1))), limit=16777216))
+    rooms, unavailable = [], []
+    for device in result.get('devices', []):
+        source = device.get('source')
+        if source not in ('local', 'remote'):
+            continue
+        if device.get('status') != 'reachable':
+            unavailable.append(clean(device.get('name', '?')))
+        for item in device.get('rooms', []):
+            if not re.fullmatch(r'\$[0-9]+', item.get('id', '')) or not isinstance(item.get('name'), str):
+                continue
+            rooms.append(dict(item, source=source, device=device['name']))
+    return rooms, unavailable
+
+
+def filtered(rooms, query, attention):
+    return [room for room in rooms if
+            (not attention or room.get('metadata', {}).get('state') in ('needs_input', 'failed'))
+            and query.casefold() in ' '.join(str(room.get(k, '')) for k in ('name', 'device')).casefold()]
+
+
+def attach(room):
+    # Fresh capture verifies immutable identity before leaving the read-only view.
+    capture(room, 1)
+    if room['source'] == 'local':
+        if os.environ.get('TMUX'):
+            # switch-client keeps the existing tmux client instead of nesting one.
+            return subprocess.call(['tmux', 'switch-client', '-t', room['id']])
+        args = [SCRIPT, '--attach-id', room['id'][1:], room['name']]
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', room['name']):
+            args = ['tmux', 'attach-session', '-t', room['id']]
+    else:
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', room['name']):
+            raise RuntimeError('remote room name is display-only')
+        target = hosts().get(room['device'])
+        if not target:
+            raise RuntimeError('device no longer configured')
+        args = ['ssh', '-t', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', target,
+                '/usr/bin/env ' + REMOTE_PATH + ' ' + ' '.join(shlex.quote(arg) for arg in ['tmux-room', '--attach-id', room['id'][1:], room['name']])]
+    return subprocess.call(args)
+
+
+def main(screen):
+    curses.curs_set(0)
+    screen.timeout(100)
+    workers = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    collector = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    rooms, unavailable, previews, pending = [], [], {}, {}
+    inventory_job = None
+    next_inventory, selected = 0, 0
+    query, attention, searching, confirm = '', False, False, None
+    notice = 'Loading fleet...'
+
+    def put(y, x, text, width, attr=0):
+        h, w = screen.getmaxyx()
+        if 0 <= y < h and 0 <= x < w:
+            try:
+                screen.addstr(y, x, fit(text, min(width, w - x - 1)), attr)
+            except curses.error:
+                pass
+
+    try:
+        while True:
+            now = time.monotonic()
+            if inventory_job is None and now >= next_inventory:
+                inventory_job = collector.submit(inventory)
+            if inventory_job is not None and inventory_job.done():
+                try:
+                    old_matches = filtered(rooms, query, attention)
+                    old_key = key(old_matches[min(max(0, selected), len(old_matches) - 1)]) if old_matches else None
+                    rooms, unavailable = inventory_job.result()
+                    matches = filtered(rooms, query, attention)
+                    selected = next((i for i, item in enumerate(matches) if key(item) == old_key), 0)
+                    valid = {key(item) for item in rooms}
+                    for stale_key in set(attempts) - valid:
+                        attempts.pop(stale_key, None)
+                    previews = {k: v for k, v in previews.items() if k in valid}
+                    notice = ('Unavailable: ' + ', '.join(unavailable)) if unavailable else 'Read-only previews of each room active pane'
+                except Exception:
+                    notice = 'Fleet refresh unavailable; keeping previous rooms'
+                inventory_job, next_inventory = None, now + 15
+            for item_key, job in list(pending.items()):
+                if job.done():
+                    try:
+                        pane, lines = job.result()
+                        previews[item_key] = (now, pane, lines, '')
+                    except Exception:
+                        previous = previews.get(item_key, (0, '', [], ''))
+                        previews[item_key] = (previous[0], previous[1], previous[2], 'unavailable')
+                    del pending[item_key]
+            matches = filtered(rooms, query, attention)
+            selected = min(max(0, selected), max(0, len(matches) - 1))
+            height, width = screen.getmaxyx()
+            columns, rows, capacity = layout(height, width, len(matches))
+            page = selected // capacity
+            visible = matches[page * capacity:(page + 1) * capacity]
+            screen.erase()
+            put(0, 0, 'TMUX ROOM / WATCH   {} rooms   page {}/{}{}'.format(len(matches), page + 1,
+                max(1, math.ceil(len(matches) / capacity)), '   ATTENTION' if attention else ''), width, curses.A_BOLD)
+            put(1, 0, ('Search: ' + query + ('_' if searching else '')) if query or searching else notice, width)
+            if height < 10 or width < 28:
+                put(3, 0, 'Enlarge terminal to see previews', width)
+            elif not visible:
+                put(4, 1, 'No matching rooms' if rooms else notice, width - 2)
+            else:
+                eligible = []
+                for offset, room in enumerate(visible):
+                    col, row = offset % columns, offset // columns
+                    x, y = col * width // columns, 2 + row * (height - 4) // rows
+                    tile_width = (col + 1) * width // columns - x
+                    tile_height = (row + 1) * (height - 4) // rows - row * (height - 4) // rows
+                    selected_tile = page * capacity + offset == selected
+                    attr = curses.A_REVERSE if selected_tile else curses.A_BOLD
+                    meta, item_key = room.get('metadata', {}), key(room)
+                    put(y, x, ('> ' if selected_tile else '  ') + room['name'] + ' @ ' + room['device'], tile_width - 1, attr)
+                    preview = previews.get(item_key, (0, '', [], 'loading'))
+                    age = str(int(now - preview[0])) + 's ago' if preview[0] else 'waiting'
+                    put(y + 1, x, '{} | {} | {} {}'.format(meta.get('driver', 'unknown'), meta.get('state', 'unknown'), preview[3] or preview[1], age), tile_width - 1)
+                    body_height = max(1, tile_height - 3)
+                    for i, line in enumerate(preview[2][-body_height:]):
+                        put(y + 2 + i, x, line, tile_width - 2)
+                    put(y + tile_height - 1, x, '-' * (tile_width - 1), tile_width - 1, curses.A_DIM)
+                    # No queued work for off-page rooms; maximum eight concurrent SSH captures.
+                    last_attempt = attempts.get(item_key, 0)
+                    if item_key not in pending and now - last_attempt >= 2:
+                        eligible.append((last_attempt, item_key, room, body_height))
+                for _, item_key, room, body_height in sorted(eligible, key=lambda entry: entry[0]):
+                    if len(pending) >= 8:
+                        break
+                    pending[item_key] = workers.submit(capture, dict(room), body_height)
+                    attempts[item_key] = now
+            footer = 'q quit | Enter attach | arrows select | / search | a attention | c clear | r refresh | PgUp/PgDn'
+            if width < 80:
+                footer = 'q quit  Enter attach  / find  a filter'
+            if confirm is not None:
+                footer = 'Attach to {} @ {}? Enter confirms, Esc cancels'.format(confirm['name'], confirm['device'])
+            put(height - 2, 0, footer, width, curses.A_BOLD)
+            hint = 'Arrows select  PgUp/Dn page  r refresh' if width < 96 else 'Previews refresh 2s / fleet 15s. Resize adjusts the grid.'
+            if confirm is not None:
+                footer = 'Enter: attach   Esc: cancel'
+                put(height - 2, 0, footer + ' ' * width, width, curses.A_BOLD)
+                hint = confirm['name'] + ' @ ' + confirm['device']
+            put(height - 1, 0, hint, width, curses.A_DIM)
+            screen.refresh()
+            try:
+                char = screen.get_wch()
+            except curses.error:
+                continue
+            if confirm is not None:
+                if char in ('\n', '\r', curses.KEY_ENTER):
+                    curses.def_prog_mode()
+                    curses.endwin()
+                    try:
+                        attached = attach(confirm)
+                        if attached == 0 and confirm['source'] == 'local' and os.environ.get('TMUX'):
+                            return
+                        notice = 'Returned from attachment'
+                    except Exception as error:
+                        notice = 'Attach unavailable: ' + clean(error)
+                    finally:
+                        curses.reset_prog_mode()
+                        screen.refresh()
+                    next_inventory = 0
+                confirm = None
+                continue
+            if searching:
+                if char in ('\n', '\r', '\x1b'):
+                    searching = False
+                elif char in (curses.KEY_BACKSPACE, '\x7f', '\b'):
+                    query = query[:-1]
+                elif isinstance(char, str) and char.isprintable() and len(query) < 100:
+                    query += clean(char)
+                selected = 0
+            elif char in ('q', '\x1b'):
+                break
+            elif char == '/':
+                searching = True
+            elif char == 'r':
+                next_inventory = 0
+                attempts.clear()
+            elif char == 'a':
+                attention, selected = not attention, 0
+            elif char == 'c':
+                query, attention, selected = '', False, 0
+            elif char in (curses.KEY_LEFT, 'h'):
+                selected -= 1
+            elif char in (curses.KEY_RIGHT, 'l'):
+                selected += 1
+            elif char in (curses.KEY_UP, 'k'):
+                selected -= columns
+            elif char in (curses.KEY_DOWN, 'j'):
+                selected += columns
+            elif char == curses.KEY_NPAGE:
+                selected += capacity
+            elif char == curses.KEY_PPAGE:
+                selected -= capacity
+            elif char in ('\n', '\r', curses.KEY_ENTER) and matches:
+                confirm = dict(matches[selected])
+    finally:
+        STOP.set()
+        workers.shutdown(wait=True)
+        collector.shutdown(wait=True)
+
+
+attempts = {}
+if __name__ == '__main__':
+    try:
+        # Python source arrives on stdin; curses must read the controlling terminal.
+        with open('/dev/tty', 'rb', buffering=0) as terminal:
+            os.dup2(terminal.fileno(), 0)
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        pass
+    except (curses.error, OSError) as error:
+        print('Unable to open watch: ' + clean(error), file=sys.stderr)
+        sys.exit(1)
 PY
 }
 
@@ -3817,6 +4190,7 @@ if [[ $# -eq 0 ]] && [[ -s "$TMUX_ROOM_HOSTS_FILE" ]] && grep -Eq '^[[:space:]]*
 fi
 
 case "${1:-}" in
+  --watch|--god) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --watch" >&2; exit 2; }; run_watch; exit $? ;;
   --fleet-json) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --fleet-json" >&2; exit 2; }; print_fleet_json; exit $? ;;
   --fleet) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --fleet" >&2; exit 2; }; run_fleet; exit $? ;;
   --all) print_all_devices; exit 0 ;;

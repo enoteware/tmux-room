@@ -1785,4 +1785,6 @@ esac
 
 REAL_TMUX_SOCKET=""
 
+python3 "$(dirname "$SCRIPT")/../tests/test_watch.py"
+
 echo "tests passed"

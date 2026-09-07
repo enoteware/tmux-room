@@ -70,6 +70,7 @@ tmux-room                 # compact picker; selection reveals details before att
 tmux-room --open          # menu: client, agent, model; create, /start, attach
 tmux-room --list          # compact one-row-per-room table
 tmux-room --fleet         # searchable local and SSH-device picker
+tmux-room --watch         # live, responsive grid of local and SSH rooms
 tmux-room --fleet-json    # versioned aggregate fleet document
 tmux-room --inspect my-room
 tmux-room --json           # stable, machine-readable local inventory
@@ -138,6 +139,27 @@ tmux-room --kill mini:kh-review
 ```
 
 Remote inspect and JSON commands are read-only and use SSH batch mode without allocating a pseudo-terminal.
+
+## Live room overview
+
+Run `tmux-room --watch` (or `--god`) to observe several rooms at once. The grid
+uses the terminal's current width and height and rearranges when the window
+resizes. Extra rooms continue on another page so previews stay readable.
+
+Each tile shows the device, room, declared agent, attention state, and a live
+snapshot of the room's active pane. This explicit view reads terminal contents;
+ordinary inventory and JSON commands remain metadata-only. Previews stay in
+memory and do not attach to, resize, or send input to the source terminals.
+
+Use the arrow keys to select a tile, Enter to confirm attachment, `/` to search,
+`c` to clear the search, `a` to toggle rooms needing attention, and `q` to quit.
+Use Page Up and Page Down to change pages, and `r` to refresh the fleet. Detach from an attached
+room with `Ctrl-b`, then `d`.
+
+The overview uses the same configured SSH hosts as the fleet picker. Slow or
+unavailable rooms show their status while the rest of the grid stays usable.
+Remote machines need Python 3 and tmux, but do not need a new tmux-room version
+for previews. Requires an interactive terminal with Python's curses module.
 
 ## Client and project emoji
 
