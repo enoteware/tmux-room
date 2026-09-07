@@ -1330,9 +1330,13 @@ compact_agent_label() {
 
 terminal_columns() {
   local value="${TMUX_ROOM_COLUMNS:-}" size
-  if [[ -z "$value" && -t 0 ]]; then
-    size=$(stty size 2>/dev/null || true)
-    value="${size##* }"
+  if [[ -z "$value" ]]; then
+    if [[ -t 0 ]]; then
+      size=$(stty size 2>/dev/null || true)
+    elif [[ -t 2 ]]; then
+      size=$(stty size <&2 2>/dev/null || true)
+    fi
+    [[ -n "${size:-}" ]] && value="${size##* }"
   fi
   value="${value:-${COLUMNS:-120}}"
   if [[ "$value" =~ ^[0-9]+$ && ${#value} -le 4 ]]; then
@@ -1347,9 +1351,13 @@ terminal_columns() {
 
 terminal_lines() {
   local value="${TMUX_ROOM_LINES:-}" size
-  if [[ -z "$value" && -t 0 ]]; then
-    size=$(stty size 2>/dev/null || true)
-    value="${size%% *}"
+  if [[ -z "$value" ]]; then
+    if [[ -t 0 ]]; then
+      size=$(stty size 2>/dev/null || true)
+    elif [[ -t 2 ]]; then
+      size=$(stty size <&2 2>/dev/null || true)
+    fi
+    [[ -n "${size:-}" ]] && value="${size%% *}"
   fi
   value="${value:-${LINES:-24}}"
   if [[ "$value" =~ ^[0-9]+$ && ${#value} -le 4 ]]; then
@@ -4136,7 +4144,11 @@ fleet_picker() {
       w|W)
         watch_rc=0
         run_watch || watch_rc=$?
-        ((watch_rc == 0 || watch_rc == 91)) || echo "Unable to open watch." >&2
+        if ((watch_rc != 0 && watch_rc != 91)); then
+          echo "Unable to open watch." >&2
+          printf 'Press Enter to return to the fleet: '
+          read -r rest || true
+        fi
         return "$FLEET_PICKER_RELOAD"
         ;;
       q|Q) return 0 ;;
@@ -4316,7 +4328,11 @@ arrow_picker() {
         w|W)
           watch_rc=0
           run_watch || watch_rc=$?
-          ((watch_rc == 0 || watch_rc == 91)) || echo "Unable to open watch." >&2
+          if ((watch_rc != 0 && watch_rc != 91)); then
+            echo "Unable to open watch." >&2
+            printf 'Press Enter to return to the room list: '
+            read -r rest || true
+          fi
           break
           ;;
         q|Q) return 1 ;;

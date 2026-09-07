@@ -132,18 +132,20 @@ class TerminalSizingTests(unittest.TestCase):
             definitions.append(name + "() {" + body + "\n}")
         cls.program = "\n".join(definitions) + "\nterminal_columns; printf ' ' ; terminal_lines"
 
-    def measure(self, tty_size=None, **overrides):
+    def measure(self, tty_size=None, stderr_tty=False, **overrides):
         environment = {key: value for key, value in os.environ.items()
                        if key not in ("TMUX_ROOM_COLUMNS", "TMUX_ROOM_LINES", "COLUMNS", "LINES")}
         environment.update(overrides)
         if tty_size is None:
-            return subprocess.check_output(["bash", "-c", self.program], stdin=subprocess.DEVNULL,
+            return subprocess.check_output(["bash", "-c", self.program], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                            env=environment, text=True, timeout=5)
         master, slave = pty.openpty()
         try:
             columns, rows = tty_size
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-            return subprocess.check_output(["bash", "-c", self.program], stdin=slave,
+            return subprocess.check_output(["bash", "-c", self.program],
+                                           stdin=subprocess.DEVNULL if stderr_tty else slave,
+                                           stderr=slave if stderr_tty else subprocess.DEVNULL,
                                            env=environment, text=True, timeout=5)
         finally:
             os.close(slave)
@@ -154,6 +156,11 @@ class TerminalSizingTests(unittest.TestCase):
             with self.subTest(size=size):
                 self.assertEqual(self.measure(size, COLUMNS="120", LINES="30"),
                                  str(size[0]) + " " + str(size[1]))
+
+    def test_piped_input_uses_terminal_on_stderr(self):
+        self.assertEqual(self.measure((40, 12), stderr_tty=True), "40 12")
+        self.assertEqual(self.measure((40, 12), stderr_tty=True,
+                                     TMUX_ROOM_COLUMNS="80", TMUX_ROOM_LINES="24"), "80 24")
 
     def test_explicit_overrides_win_over_real_terminal(self):
         self.assertEqual(self.measure((160, 48), TMUX_ROOM_COLUMNS="080", TMUX_ROOM_LINES="024"), "80 24")
