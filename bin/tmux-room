@@ -35,6 +35,8 @@ Usage:
   tmux-room --list                Show compact local room table
   tmux-room --all                 Show compact local and SSH-device tables
   tmux-room --fleet               Search or print the unified device fleet
+  tmux-room --watch               Live room grid, auto-sized to the terminal
+  tmux-room --god                 Alias for --watch
   tmux-room --fleet-json          Print the versioned aggregate fleet JSON
   tmux-room --all --json          Alias for --fleet-json
   tmux-room --json [room]         Print the versioned local JSON inventory
@@ -62,7 +64,8 @@ Format (one device per line):
 
 Set a friendly local name in ~/.config/tmux-room/device or TMUX_ROOM_DEVICE.
 Detach from tmux with Ctrl-b then d.
-In interactive pickers, press / to search, c to clear the search, and x to
+In interactive pickers, press w for the live overview, / to search, c to
+clear the search, and x to
 close the highlighted room. Closing always asks for two confirmations: the
 exact room name, then the word KILL. A room on another device is confirmed on
 that device. Protect a room with --metadata <room> --protected to refuse x
@@ -358,6 +361,497 @@ except (ValueError, OSError):
     ram = 'RAM unavailable'
 
 print(f'CPU {cpu_pct}% load ({load:.2f}/{cores}) · {ram}')
+PY
+}
+
+run_watch() {
+  command -v python3 >/dev/null 2>&1 || { echo "Watch requires Python 3." >&2; return 127; }
+  [[ -t 0 && -t 1 ]] || { echo "Watch requires an interactive terminal." >&2; return 2; }
+  python3 - "$0" "$TMUX_ROOM_HOSTS_FILE" "$TMUX_ROOM_REMOTE_PATH_ASSIGNMENT" <<'PY'
+import concurrent.futures
+import curses
+import json
+import math
+import os
+import re
+import selectors
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+import unicodedata
+
+SCRIPT, HOSTS, REMOTE_PATH = sys.argv[1:4]
+STOP = threading.Event()
+ANSI = re.compile(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]')
+
+
+def clean(value):
+    value = ANSI.sub('', str(value))
+    return ''.join(ch for ch in value if not unicodedata.category(ch).startswith('C'))
+
+
+def fit(value, width):
+    """Clip to terminal cells, retaining accents and avoiding split wide glyphs."""
+    result, used = [], 0
+    for ch in clean(value):
+        cells = 0 if unicodedata.combining(ch) else (2 if unicodedata.east_asian_width(ch) in 'WF' else 1)
+        if used + cells > max(0, width):
+            break
+        if cells or result:
+            result.append(ch)
+            used += cells
+    return ''.join(result)
+
+
+def layout(height, width, count):
+    """Use spare space for larger previews; paginate below useful tile sizes."""
+    usable = max(1, height - 4)
+    columns = min(max(1, width // 44), max(1, count), 4)
+    rows = min(max(1, usable // 10), max(1, math.ceil(count / columns)))
+    return columns, rows, columns * rows
+
+
+def hosts():
+    result = {}
+    try:
+        with open(HOSTS, encoding='utf-8') as source:
+            for line in source:
+                fields = line.split()
+                if not fields or fields[0].startswith('#') or len(fields) != 2:
+                    continue
+                name, target = fields
+                if (re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', name)
+                        and not target.startswith('-') and re.fullmatch(r'[A-Za-z0-9._@:-]+', target)):
+                    result.setdefault(name, target)
+    except OSError:
+        pass
+    return result
+
+
+def bounded(argv, timeout=8, limit=262144):
+    """Bound time and bytes, and terminate descendants when the view closes."""
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                if STOP.is_set() or time.monotonic() >= deadline:
+                    raise RuntimeError('capture timed out')
+                if not selector.select(.1):
+                    continue
+                chunk = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > limit:
+                    raise RuntimeError('output exceeded limit')
+        while process.poll() is None:
+            if STOP.wait(.1) or time.monotonic() >= deadline:
+                raise RuntimeError('command timed out')
+        if process.returncode:
+            raise RuntimeError('command unavailable')
+        return data.decode('utf-8', errors='replace')
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        process.stdout.close()
+
+
+# Same identity check locally and remotely. The captured pane is an immutable pane ID.
+# A changed active pane/session invalidates the result rather than showing another room.
+CAPTURE = r'''
+import json, re, subprocess, sys
+sid, name, lines = sys.argv[1:]
+def run(*args):
+    return subprocess.check_output(['tmux'] + list(args), stderr=subprocess.DEVNULL, timeout=3).decode('utf-8', 'replace')
+def identity():
+    return run('display-message', '-p', '-t', sid + ':', '#{session_id}|#{session_name}|#{pane_id}').rstrip('\n')
+if not re.fullmatch(r'\$[0-9]+', sid): raise RuntimeError('invalid session')
+before = identity()
+prefix = sid + '|' + name + '|'
+if not before.startswith(prefix): raise RuntimeError('session identity changed')
+pane = before[len(prefix):]
+if not re.fullmatch(r'%[0-9]+', pane): raise RuntimeError('invalid pane')
+output = run('capture-pane', '-p', '-t', pane, '-S', '-' + str(min(80, max(1, int(lines)))))
+if before != identity(): raise RuntimeError('session identity changed')
+print(json.dumps({'pane': pane, 'text': output}))
+'''
+
+
+def key(room):
+    return room['source'], room['device'], room['id'], room['name']
+
+
+def ssh_args(target):
+    return ['ssh', '-n', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=4',
+            '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=3',
+            '-o', 'ServerAliveCountMax=1', target]
+
+
+def capture(room, lines):
+    args = ['python3', '-c', CAPTURE, room['id'], room['name'], str(lines)]
+    if room['source'] == 'remote':
+        target = hosts().get(room['device'])
+        if not target:
+            raise RuntimeError('device no longer configured')
+        args = ssh_args(target) + ['/usr/bin/env ' + REMOTE_PATH + ' ' + ' '.join(shlex.quote(arg) for arg in args)]
+    value = json.loads(bounded(args))
+    if room['source'] == 'local' and value['pane'] == os.environ.get('TMUX_PANE'):
+        return value['pane'], ['This pane is running the overview.']
+    # Pane data stays in memory and is never used as terminal input or markup.
+    lines = [clean(line.expandtabs(4)) for line in value['text'].splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return value['pane'], lines
+
+
+def inventory():
+    result = json.loads(bounded([SCRIPT, '--fleet-json'], timeout=max(30, min(180, 16 * (len(hosts()) + 1))), limit=16777216))
+    rooms, unavailable = [], []
+    for device in result.get('devices', []):
+        source = device.get('source')
+        if source not in ('local', 'remote'):
+            continue
+        if device.get('status') != 'reachable':
+            unavailable.append(clean(device.get('name', '?')))
+        for item in device.get('rooms', []):
+            if not re.fullmatch(r'\$[0-9]+', item.get('id', '')) or not isinstance(item.get('name'), str):
+                continue
+            rooms.append(dict(item, source=source, device=device['name']))
+    return rooms, unavailable
+
+
+def filtered(rooms, query, attention):
+    return [room for room in rooms if
+            (not attention or room.get('metadata', {}).get('state') in ('needs_input', 'failed'))
+            and query.casefold() in ' '.join(str(room.get(k, '')) for k in ('name', 'device')).casefold()]
+
+
+def attach(room):
+    # Fresh capture verifies immutable identity before leaving the read-only view.
+    capture(room, 1)
+    if room['source'] == 'local':
+        if os.environ.get('TMUX'):
+            # switch-client keeps the existing tmux client instead of nesting one.
+            return subprocess.call(['tmux', 'switch-client', '-t', room['id']])
+        args = [SCRIPT, '--attach-id', room['id'][1:], room['name']]
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', room['name']):
+            args = ['tmux', 'attach-session', '-t', room['id']]
+    else:
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', room['name']):
+            raise RuntimeError('remote room name is display-only')
+        target = hosts().get(room['device'])
+        if not target:
+            raise RuntimeError('device no longer configured')
+        args = ['ssh', '-t', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', target,
+                '/usr/bin/env ' + REMOTE_PATH + ' ' + ' '.join(shlex.quote(arg) for arg in ['tmux-room', '--attach-id', room['id'][1:], room['name']])]
+    return subprocess.call(args)
+
+
+def ordered_rooms(rooms, order):
+    """Keep user tile swaps across refreshes; append genuinely new rooms."""
+    by_key = {key(room): room for room in rooms}
+    stable = [item for item in order if item in by_key]
+    known = set(stable)
+    stable.extend(key(room) for room in rooms if key(room) not in known)
+    return [by_key[item] for item in stable], stable
+
+
+def swap_rooms(rooms, source_key, target_key):
+    result = list(rooms)
+    indices = {key(room): index for index, room in enumerate(result)}
+    if source_key in indices and target_key in indices:
+        a, b = indices[source_key], indices[target_key]
+        result[a], result[b] = result[b], result[a]
+    return result
+
+
+def palette():
+    """Use explicit foreground/background pairs, readable on either theme."""
+    fallback = {'header': curses.A_REVERSE | curses.A_BOLD,
+                'selected': curses.A_REVERSE | curses.A_BOLD,
+                'border': curses.A_BOLD, 'running': curses.A_REVERSE,
+                'needs_input': curses.A_REVERSE | curses.A_BOLD,
+                'failed': curses.A_REVERSE | curses.A_BOLD,
+                'idle': curses.A_BOLD, 'completed': curses.A_BOLD, 'ended': curses.A_BOLD, 'unknown': curses.A_BOLD}
+    if 'NO_COLOR' in os.environ or os.environ.get('TERM') == 'dumb':
+        return fallback
+    try:
+        if not curses.has_colors():
+            return fallback
+        curses.start_color()
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+        pairs = [('header', curses.COLOR_WHITE, curses.COLOR_BLUE),
+                 ('selected', curses.COLOR_BLACK, curses.COLOR_CYAN),
+                 ('running', curses.COLOR_BLACK, curses.COLOR_GREEN),
+                 ('needs_input', curses.COLOR_BLACK, curses.COLOR_YELLOW),
+                 ('failed', curses.COLOR_WHITE, curses.COLOR_RED)]
+        for number, (name, foreground, background) in enumerate(pairs, 1):
+            curses.init_pair(number, foreground, background)
+            fallback[name] = curses.color_pair(number) | curses.A_BOLD
+    except curses.error:
+        pass
+    return fallback
+
+
+def main(screen):
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    styles = palette()
+    screen.timeout(100)
+    workers = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    collector = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    rooms, unavailable, previews, pending = [], [], {}, {}
+    inventory_job = None
+    next_inventory, selected = 0, 0
+    query, attention, searching, confirm = '', False, False, None
+    notice = 'Loading fleet...'
+    order, chooser = [], None
+
+    def put(y, x, text, width, attr=0):
+        h, w = screen.getmaxyx()
+        if 0 <= y < h and 0 <= x < w:
+            try:
+                screen.addstr(y, x, fit(text, min(width, w - x - 1)), attr)
+            except curses.error:
+                pass
+
+    try:
+        while True:
+            now = time.monotonic()
+            if inventory_job is None and now >= next_inventory:
+                inventory_job = collector.submit(inventory)
+            if inventory_job is not None and inventory_job.done():
+                try:
+                    old_matches = filtered(rooms, query, attention)
+                    old_key = key(old_matches[min(max(0, selected), len(old_matches) - 1)]) if old_matches else None
+                    fresh_rooms, unavailable = inventory_job.result()
+                    rooms, order = ordered_rooms(fresh_rooms, order)
+                    matches = filtered(rooms, query, attention)
+                    selected = next((i for i, item in enumerate(matches) if key(item) == old_key), 0)
+                    valid = {key(item) for item in rooms}
+                    for stale_key in set(attempts) - valid:
+                        attempts.pop(stale_key, None)
+                    previews = {k: v for k, v in previews.items() if k in valid}
+                    notice = ('Unavailable: ' + ', '.join(unavailable)) if unavailable else 'Read-only previews of each room active pane'
+                except Exception:
+                    notice = 'Fleet refresh unavailable; keeping previous rooms'
+                inventory_job, next_inventory = None, now + 15
+            for item_key, job in list(pending.items()):
+                if job.done():
+                    try:
+                        pane, lines = job.result()
+                        previews[item_key] = (now, pane, lines, '')
+                    except Exception:
+                        previous = previews.get(item_key, (0, '', [], ''))
+                        previews[item_key] = (previous[0], previous[1], previous[2], 'unavailable')
+                    del pending[item_key]
+            matches = filtered(rooms, query, attention)
+            selected = min(max(0, selected), max(0, len(matches) - 1))
+            height, width = screen.getmaxyx()
+            columns, rows, capacity = layout(height, width, len(matches))
+            page = selected // capacity
+            visible = matches[page * capacity:(page + 1) * capacity]
+            screen.erase()
+            title = ' TMUX ROOM  Rooms [g] | WATCH  {} rooms  {}/{}{}'.format(len(matches), page + 1,
+                max(1, math.ceil(len(matches) / capacity)), '  ATTENTION' if attention else '')
+            if width < 65:
+                title = ' Rooms [g] | WATCH  {}  {}/{}'.format(len(matches), page + 1, max(1, math.ceil(len(matches) / capacity)))
+            put(0, 0, title.ljust(width), width, styles['header'])
+            put(1, 0, ('Search: ' + query + ('_' if searching else '')) if query or searching else notice, width)
+            if height < 10 or width < 28:
+                put(3, 0, 'Enlarge terminal to see previews', width)
+            elif not visible:
+                put(4, 1, 'No matching rooms' if rooms else notice, width - 2)
+            else:
+                eligible = []
+                for offset, room in enumerate(visible):
+                    col, row = offset % columns, offset // columns
+                    x, y = col * width // columns, 2 + row * (height - 4) // rows
+                    tile_width = (col + 1) * width // columns - x
+                    tile_height = (row + 1) * (height - 4) // rows - row * (height - 4) // rows
+                    selected_tile = page * capacity + offset == selected
+                    attr = styles['selected'] if selected_tile else styles['border']
+                    meta, item_key = room.get('metadata', {}), key(room)
+                    right = x + tile_width - 2
+                    inner = max(1, tile_width - 4)
+                    put(y, x, '+' + '-' * max(0, tile_width - 3) + '+', tile_width - 1, attr)
+                    put(y + tile_height - 1, x, '+' + '-' * max(0, tile_width - 3) + '+', tile_width - 1, attr)
+                    for border_y in range(y + 1, y + tile_height - 1):
+                        put(border_y, x, '|', 1, attr)
+                        put(border_y, right, '|', 1, attr)
+                    heading = ('> ' if selected_tile else '  ') + room['name'] + ' @ ' + room['device']
+                    put(y + 1, x + 1, fit(heading, tile_width - 3).ljust(tile_width - 3), tile_width - 3, attr)
+                    preview = previews.get(item_key, (0, '', [], 'loading'))
+                    age = str(int(now - preview[0])) + 's' if preview[0] else 'waiting'
+                    state = meta.get('state', 'unknown')
+                    labels = {'needs_input': 'INPUT', 'running': 'RUNNING', 'failed': 'FAILED', 'idle': 'IDLE', 'completed': 'DONE', 'ended': 'ENDED'}
+                    badge = ' ' + labels.get(state, 'UNKNOWN') + ' '
+                    put(y + 2, x + 2, badge, inner, styles.get(state, styles['unknown']))
+                    put(y + 2, x + 2 + len(badge), ' {} | {} {}'.format(meta.get('driver', '?'), preview[3] or preview[1], age), inner - len(badge))
+                    body_height = max(1, tile_height - 4)
+                    for i, line in enumerate(preview[2][-body_height:]):
+                        put(y + 3 + i, x + 2, line, inner)
+                    # No queued work for off-page rooms; maximum eight concurrent SSH captures.
+                    last_attempt = attempts.get(item_key, 0)
+                    if item_key not in pending and now - last_attempt >= 2:
+                        eligible.append((last_attempt, item_key, room, body_height))
+                for _, item_key, room, body_height in sorted(eligible, key=lambda entry: entry[0]):
+                    if len(pending) >= 8:
+                        break
+                    pending[item_key] = workers.submit(capture, dict(room), body_height)
+                    attempts[item_key] = now
+            footer = 'Enter attach  s swap  / find  a attention  g rooms  q quit'
+            hint = 'Arrows select  PgUp/Dn page  r refresh  c clear | Read-only'
+            if width < 65:
+                footer = 'Enter attach  s swap  / find  q quit'
+                hint = 'Arrows  PgUp/Dn  a filter  r sync  g rooms'
+            if confirm is not None:
+                footer = 'Enter: attach   Esc: cancel'
+                hint = confirm['name'] + ' @ ' + confirm['device']
+            put(height - 2, 0, footer.ljust(width), width, styles['header'])
+            put(height - 1, 0, hint, width)
+            choices = []
+            if chooser is not None:
+                choices = [room for room in filtered(rooms, chooser['query'], False)
+                           if key(room) != chooser['source']]
+                chooser['selected'] = min(max(0, chooser['selected']), max(0, len(choices) - 1))
+                box_width, box_height = max(1, min(width - 2, 74)), max(1, min(height - 2, 16))
+                box_x, box_y = max(0, (width - box_width) // 2), max(0, (height - box_height) // 2)
+                for line_y in range(box_height):
+                    put(box_y + line_y, box_x, ' ' * box_width, box_width, curses.A_NORMAL)
+                put(box_y, box_x, ' SWAP ROOM '.ljust(box_width), box_width, styles['header'])
+                put(box_y + 1, box_x + 1, 'Find: ' + chooser['query'] + '_', box_width - 2)
+                choice_count = max(1, box_height - 4)
+                first = chooser['selected'] // choice_count * choice_count
+                for index, room in enumerate(choices[first:first + choice_count], first):
+                    label = ('> ' if index == chooser['selected'] else '  ') + room['name'] + ' @ ' + room['device']
+                    put(box_y + 2 + index - first, box_x + 1, fit(label, box_width - 2).ljust(box_width - 2), box_width - 2,
+                        styles['selected'] if index == chooser['selected'] else curses.A_NORMAL)
+                if not choices:
+                    put(box_y + 2, box_x + 1, 'No matching rooms', box_width - 2)
+                put(box_y + box_height - 2, box_x + 1, 'Arrows choose  Enter swap  Esc cancel', box_width - 2, curses.A_BOLD)
+                put(box_y + box_height - 1, box_x, (' {} rooms | layout only '.format(len(choices))).ljust(box_width), box_width, styles['header'])
+            screen.refresh()
+            try:
+                char = screen.get_wch()
+            except curses.error:
+                continue
+            if chooser is not None:
+                if char == '\x1b':
+                    chooser = None
+                elif char in ('\n', '\r', curses.KEY_ENTER) and choices:
+                    target = key(choices[chooser['selected']])
+                    source = chooser['source']
+                    rooms = swap_rooms(rooms, source, target)
+                    order = [key(room) for room in rooms]
+                    query, attention = '', False
+                    current = filtered(rooms, query, attention)
+                    selected = next((i for i, room in enumerate(current) if key(room) == target), selected)
+                    chooser = None
+                    notice = 'Room swapped. Preview only; no input sent.'
+                elif char == curses.KEY_UP:
+                    chooser['selected'] -= 1
+                elif char == curses.KEY_DOWN:
+                    chooser['selected'] += 1
+                elif char == curses.KEY_NPAGE:
+                    chooser['selected'] += choice_count
+                elif char == curses.KEY_PPAGE:
+                    chooser['selected'] -= choice_count
+                elif char in (curses.KEY_BACKSPACE, '\x7f', '\b'):
+                    chooser['query'] = chooser['query'][:-1]
+                    chooser['selected'] = 0
+                elif isinstance(char, str) and char.isprintable() and len(chooser['query']) < 100:
+                    chooser['query'] += clean(char)
+                    chooser['selected'] = 0
+                continue
+            if confirm is not None:
+                if char in ('\n', '\r', curses.KEY_ENTER):
+                    curses.def_prog_mode()
+                    curses.endwin()
+                    try:
+                        attached = attach(confirm)
+                        if attached == 0 and confirm['source'] == 'local' and os.environ.get('TMUX'):
+                            return
+                        notice = 'Returned from attachment'
+                    except Exception as error:
+                        notice = 'Attach unavailable: ' + clean(error)
+                    finally:
+                        curses.reset_prog_mode()
+                        screen.refresh()
+                    next_inventory = 0
+                confirm = None
+                continue
+            if searching:
+                if char in ('\n', '\r', '\x1b'):
+                    searching = False
+                elif char in (curses.KEY_BACKSPACE, '\x7f', '\b'):
+                    query = query[:-1]
+                elif isinstance(char, str) and char.isprintable() and len(query) < 100:
+                    query += clean(char)
+                selected = 0
+            elif char in ('q', '\x1b'):
+                break
+            elif char == 'g':
+                return 91
+            elif char == 's' and matches:
+                chooser = {'source': key(matches[selected]), 'query': '', 'selected': 0}
+            elif char == '/':
+                searching = True
+            elif char == 'r':
+                next_inventory = 0
+                attempts.clear()
+            elif char == 'a':
+                attention, selected = not attention, 0
+            elif char == 'c':
+                query, attention, selected = '', False, 0
+            elif char in (curses.KEY_LEFT, 'h'):
+                selected -= 1
+            elif char in (curses.KEY_RIGHT, 'l'):
+                selected += 1
+            elif char in (curses.KEY_UP, 'k'):
+                selected -= columns
+            elif char in (curses.KEY_DOWN, 'j'):
+                selected += columns
+            elif char == curses.KEY_NPAGE:
+                selected += capacity
+            elif char == curses.KEY_PPAGE:
+                selected -= capacity
+            elif char in ('\n', '\r', curses.KEY_ENTER) and matches:
+                confirm = dict(matches[selected])
+    finally:
+        STOP.set()
+        workers.shutdown(wait=True)
+        collector.shutdown(wait=True)
+
+
+attempts = {}
+if __name__ == '__main__':
+    try:
+        # Python source arrives on stdin; curses must read the controlling terminal.
+        with open('/dev/tty', 'rb', buffering=0) as terminal:
+            os.dup2(terminal.fileno(), 0)
+        sys.exit(curses.wrapper(main) or 0)
+    except KeyboardInterrupt:
+        pass
+    except (curses.error, OSError) as error:
+        print('Unable to open watch: ' + clean(error), file=sys.stderr)
+        sys.exit(1)
 PY
 }
 
@@ -835,10 +1329,16 @@ compact_agent_label() {
 }
 
 terminal_columns() {
-  local value="${TMUX_ROOM_COLUMNS:-${COLUMNS:-}}"
-  if [[ ! "$value" =~ ^[0-9]+$ ]] && [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
-    value=$(tput cols 2>/dev/null || true)
+  local value="${TMUX_ROOM_COLUMNS:-}" size
+  if [[ -z "$value" ]]; then
+    if [[ -t 0 ]]; then
+      size=$(stty size 2>/dev/null || true)
+    elif [[ -t 2 ]]; then
+      size=$(stty size <&2 2>/dev/null || true)
+    fi
+    [[ -n "${size:-}" ]] && value="${size##* }"
   fi
+  value="${value:-${COLUMNS:-120}}"
   if [[ "$value" =~ ^[0-9]+$ && ${#value} -le 4 ]]; then
     value=$((10#$value))
   else
@@ -847,6 +1347,38 @@ terminal_columns() {
   ((value < 20)) && value=20
   ((value > 240)) && value=240
   printf '%s' "$value"
+}
+
+terminal_lines() {
+  local value="${TMUX_ROOM_LINES:-}" size
+  if [[ -z "$value" ]]; then
+    if [[ -t 0 ]]; then
+      size=$(stty size 2>/dev/null || true)
+    elif [[ -t 2 ]]; then
+      size=$(stty size <&2 2>/dev/null || true)
+    fi
+    [[ -n "${size:-}" ]] && value="${size%% *}"
+  fi
+  value="${value:-${LINES:-24}}"
+  if [[ "$value" =~ ^[0-9]+$ && ${#value} -le 4 ]]; then
+    value=$((10#$value))
+  else
+    value=24
+  fi
+  ((value < 6)) && value=6
+  ((value > 200)) && value=200
+  printf '%s' "$value"
+}
+
+read_picker_key() {
+  local read_rc=0 read_started=$SECONDS
+  if [[ -t 0 ]]; then
+    IFS= read -rsn1 -t 1 key || read_rc=$?
+    # A timeout or resize signal redraws using the current terminal dimensions.
+    ((read_rc > 128 || (read_rc != 0 && SECONDS > read_started))) && return 2
+    return "$read_rc"
+  fi
+  IFS= read -rsn1 key
 }
 
 render_detail_rows() {
@@ -1082,8 +1614,10 @@ sys.stdout.write("\n".join(out))
 
 render_view_table() {
   local mode="$1" selected="$2" header="$3" subheader="$4" controls="$5" query="$6"
-  local width i index target selected_flag emoji_map
+  local width height interactive=0 i index target selected_flag emoji_map
   width=$(terminal_columns)
+  height=$(terminal_lines)
+  [[ -n "$controls" ]] && interactive=1
   emoji_map=$(emoji_map_payload)
   {
     if [[ "$mode" == "fleet" ]]; then
@@ -1101,7 +1635,8 @@ render_view_table() {
         "${view_pinned[index]}" "${view_devices[index]}" "$target" "${view_drivers[index]}" "${view_states[index]}" \
         "${view_windows[index]}" "${view_activity[index]}" "${view_notes[index]}"
     done
-  } | TMUX_ROOM_RENDER_WIDTH="$width" TMUX_ROOM_RENDER_HEADER="$header" \
+  } | TMUX_ROOM_RENDER_WIDTH="$width" TMUX_ROOM_RENDER_HEIGHT="$height" \
+      TMUX_ROOM_RENDER_INTERACTIVE="$interactive" TMUX_ROOM_RENDER_HEADER="$header" \
       TMUX_ROOM_RENDER_SUBHEADER="$subheader" TMUX_ROOM_RENDER_CONTROLS="$controls" \
       TMUX_ROOM_RENDER_QUERY="$query" TMUX_ROOM_RENDER_MODE="$mode" \
       TMUX_ROOM_RENDER_EMOJI="$emoji_map" python3 -c '
@@ -1176,16 +1711,18 @@ header = clean(os.environ.get("TMUX_ROOM_RENDER_HEADER", ""))
 subheader = clean(os.environ.get("TMUX_ROOM_RENDER_SUBHEADER", ""))
 controls = clean(os.environ.get("TMUX_ROOM_RENDER_CONTROLS", ""))
 query = clean(os.environ.get("TMUX_ROOM_RENDER_QUERY", ""))
-if header:
-    line(header)
-if subheader:
-    line(subheader)
-if controls:
-    line(controls)
-if query:
-    line("SEARCH: " + query)
-if header or subheader or controls or query:
-    line()
+interactive = os.environ.get("TMUX_ROOM_RENDER_INTERACTIVE") == "1"
+if not interactive:
+    if header:
+        line(header)
+    if subheader:
+        line(subheader)
+    if controls:
+        line(controls)
+    if query:
+        line("SEARCH: " + query)
+    if header or subheader or controls or query:
+        line()
 
 # prefix -> glyph, longest key first so "beat-buddies" beats "beat".
 emoji_rules = []
@@ -1239,6 +1776,101 @@ def server_label(device):
     if low in ("macbook", "mbp", "elliots-macbook-pro", "macbook-pro"):
         return "💻 mbp"
     return "🖥 " + device
+
+if interactive:
+    height = max(6, int(os.environ.get("TMUX_ROOM_RENDER_HEIGHT", "24")))
+    # Leave the last terminal line free to avoid scrolling at the bottom edge.
+    budget = height - 1
+    styled = "NO_COLOR" not in os.environ and os.environ.get("TERM", "") != "dumb"
+    narrow = width < 64
+    output = []
+
+    def add(value="", style=""):
+        value = clip(value, width)
+        if style and styled:
+            value = "\033[" + style + "m" + pad(value, width) + "\033[0m"
+        output.append(value)
+
+    def device_name(value):
+        low = value.casefold()
+        if low in ("devbox", "note-devbox", "dev"):
+            return "DevBox"
+        if low in ("mac-mini", "mini", "elliots-mac-mini"):
+            return "Mini"
+        if low in ("macbook", "mbp", "elliots-macbook-pro", "macbook-pro"):
+            return "MacBook"
+        return value
+
+    active_index = next((i for i, row in enumerate(rows) if row[1]), 0)
+    selected_row = rows[active_index] if rows else None
+    if height < 10:
+        add("TMUX ROOM", "1")
+        add("> " + selected_row[4] if selected_row else "No matching rooms", "7" if selected_row else "")
+        add("Enlarge terminal for the full list.")
+        add("Enter attach  w watch  q quit")
+        print("\n".join(output[:budget]))
+        sys.exit(0)
+    attention = sum(row[6] in ("!needs_input", "!failed") for row in rows)
+    scope = header or mode.title()
+    add("TMUX ROOM  /  " + scope, "1")
+    count_text = str(len(rows)) + " rooms  |  " + str(attention) + " need attention"
+    add(("SEARCH: " + query) if query else count_text)
+    if statuses:
+        # Keep the outage count visible even if device names exceed the width.
+        add("! " + str(len(statuses)) + " unavailable: " + ", ".join(device_name(device) + " (" + status + ")" for device, status in statuses))
+    if subheader and height >= 22:
+        add(subheader)
+
+    footer = []
+    if selected_row and height >= 16:
+        number, selected, pin, device, target, driver, state, windows, active, note = selected_row
+        footer.append("SELECTED  " + target)
+        footer.append(device_name(device) + " | " + driver + " | " + state)
+        footer.append("Note: " + (note or "No note") + ("  |  Active: " + active if width >= 100 else ""))
+    elif not selected_row:
+        footer.append("Clear search to see all rooms." if query else "Start a room to see it here.")
+    if width < 90:
+        footer.extend(["Arrows move  Enter attach  w watch", "/ search  c clear  x close  q quit"])
+    else:
+        footer.append("Arrows move   Enter attach   w watch   / search   c clear   x close   q quit")
+
+    if not narrow:
+        device_w = 10 if width < 100 else 16
+        driver_w = 12 if width < 100 else 22
+        state_w = 13
+        target_w = width - device_w - driver_w - state_w - 8
+        heading = "   " + pad("ROOM", target_w) + "  " + pad("STATE", state_w) + " " + pad("DEVICE", device_w) + " " + pad("AGENT", driver_w)
+        add(heading, "1")
+
+    row_height = 2 if narrow else 1
+    available = max(row_height, budget - len(output) - len(footer) - 1)
+    capacity = max(1, available // row_height)
+    start = (active_index // capacity) * capacity
+    end = min(len(rows), start + capacity)
+    for number, selected, pin, device, target, driver, state, windows, active, note in rows[start:end]:
+        prefix = "> " if selected else "  "
+        name = ("* " if pin else "") + target
+        if narrow:
+            add(prefix + name, "7" if selected else "")
+            add("  " + state + " | " + device_name(device) + " | " + driver, "7" if selected else "")
+        else:
+            rendered = prefix + " " + pad(name, target_w) + "  " + pad(state, state_w) + " " + pad(device_name(device), device_w) + " " + pad(driver, driver_w)
+            add(rendered, "7" if selected else "")
+    if not rows:
+        add("No rooms match this search." if query else "No rooms are available.")
+    remaining = budget - len(output) - len(footer)
+    if remaining > 0:
+        position = "Rooms " + str(start + 1) + "-" + str(end) + " of " + str(len(rows)) if rows else ""
+        add(position + ("  |  Arrows show more" if len(rows) > capacity else ""))
+        while len(output) + len(footer) < budget:
+            add()
+    for index, value in enumerate(footer):
+        add(value, "1" if index == 0 and selected_row else "")
+    # Small terminals still retain navigation controls rather than scrolling.
+    if len(output) > budget:
+        output = output[:max(1, budget - 2)] + output[-2:]
+    print("\n".join(output))
+    sys.exit(0)
 
 if statuses:
     for device, status in statuses:
@@ -3472,7 +4104,7 @@ fleet_kill_index() {
 }
 
 fleet_picker() {
-  local selected=0 query="" key rest index attach_choice summary status
+  local selected=0 query="" key rest index attach_choice summary status key_rc watch_rc
   while true; do
     build_visible_order "$query"
     if ((${#view_order[@]} == 0)); then
@@ -3491,7 +4123,10 @@ fleet_picker() {
     render_view_table fleet "$selected" "FLEET: $summary" "STATUS: $status" \
       "/ search | c clear | arrows move | Enter inspect/attach | x close | q quit" "$query"
     printf '\033[J'
-    IFS= read -rsn1 key || return 1
+    key_rc=0
+    read_picker_key || key_rc=$?
+    ((key_rc == 2)) && continue
+    ((key_rc == 0)) || return 1
     if [[ "$key" == $'\033' ]]; then
       rest=""
       IFS= read -rsn1 -t 1 rest || continue
@@ -3506,6 +4141,16 @@ fleet_picker() {
       key="$rest"
     fi
     case "$key" in
+      w|W)
+        watch_rc=0
+        run_watch || watch_rc=$?
+        if ((watch_rc != 0 && watch_rc != 91)); then
+          echo "Unable to open watch." >&2
+          printf 'Press Enter to return to the fleet: '
+          read -r rest || true
+        fi
+        return "$FLEET_PICKER_RELOAD"
+        ;;
       q|Q) return 0 ;;
       /)
         printf '\033[0m\nSearch fleet: '
@@ -3640,7 +4285,7 @@ self_update() {
 }
 
 arrow_picker() {
-  local selected=0 key rest status_line query="" index
+  local selected=0 key rest status_line query="" index key_rc watch_rc
   while true; do
     prepare_local_view
     ((${#view_names[@]} > 0)) || { echo 'No tmux rooms are running.'; return 1; }
@@ -3662,7 +4307,10 @@ arrow_picker() {
         "$query"
       printf '\033[J'
 
-      IFS= read -rsn1 key || return 1
+      key_rc=0
+    read_picker_key || key_rc=$?
+    ((key_rc == 2)) && continue
+    ((key_rc == 0)) || return 1
       if [[ "$key" == $'\033' ]]; then
         rest=""
         IFS= read -rsn1 -t 1 rest || continue
@@ -3677,6 +4325,16 @@ arrow_picker() {
         key="$rest"
       fi
       case "$key" in
+        w|W)
+          watch_rc=0
+          run_watch || watch_rc=$?
+          if ((watch_rc != 0 && watch_rc != 91)); then
+            echo "Unable to open watch." >&2
+            printf 'Press Enter to return to the room list: '
+            read -r rest || true
+          fi
+          break
+          ;;
         q|Q) return 1 ;;
         /)
           printf '\033[0m\nSearch rooms: '
@@ -3817,6 +4475,7 @@ if [[ $# -eq 0 ]] && [[ -s "$TMUX_ROOM_HOSTS_FILE" ]] && grep -Eq '^[[:space:]]*
 fi
 
 case "${1:-}" in
+  --watch|--god) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --watch" >&2; exit 2; }; watch_rc=0; run_watch || watch_rc=$?; if ((watch_rc == 91)); then run_fleet; exit $?; fi; exit "$watch_rc" ;;
   --fleet-json) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --fleet-json" >&2; exit 2; }; print_fleet_json; exit $? ;;
   --fleet) [[ $# -eq 1 ]] || { echo "Usage: tmux-room --fleet" >&2; exit 2; }; run_fleet; exit $? ;;
   --all) print_all_devices; exit 0 ;;

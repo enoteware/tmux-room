@@ -1455,6 +1455,12 @@ arrow_close_output=$(printf '\033[Bxbeta\nKILL\n' | PATH="$MOCK:/usr/bin:/bin" T
 assert_contains "$arrow_close_output" "Killed room: beta"
 assert_contains "$(<"$TMUX_LOG")" "kill-session -t \$2"
 
+watch_error_output=$(printf 'w\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT" 2>&1)
+assert_contains "$watch_error_output" "Watch requires an interactive terminal."
+assert_contains "$watch_error_output" "Press Enter to return to the room list:"
+fleet_watch_error_output=$(printf 'w\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_ROOM_DEVICE=devbox TMUX_ROOM_HOSTS_FILE="$FLEET_HOSTS" "$SCRIPT" --fleet 2>&1)
+assert_contains "$fleet_watch_error_output" "Press Enter to return to the fleet:"
+
 search_output=$(printf '/beta\nq' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORCE_ARROW=1 TMUX_TWO_ROOMS=1 TMUX_ROOM_DEVICE=devbox "$SCRIPT")
 assert_contains "$search_output" "SEARCH: beta"
 assert_filtered_screen "$search_output" "beta" "beta" "alpha"
@@ -1784,5 +1790,9 @@ esac
 "$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" kill-session -t naturalcatchers
 
 REAL_TMUX_SOCKET=""
+
+python3 "$(dirname "$SCRIPT")/../tests/test_watch.py"
+
+python3 "$ROOT/tests/test_picker.py"
 
 echo "tests passed"
