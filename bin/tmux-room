@@ -20,6 +20,8 @@ TMUX_ROOM_REMOTE_PATH_ASSIGNMENT='PATH="$HOME/bin:$HOME/.local/bin:/opt/homebrew
 TMUX_ROOM_OPTION_DRIVER='@tmux_room_driver'
 TMUX_ROOM_OPTION_STATE='@tmux_room_state'
 TMUX_ROOM_OPTION_STATE_AT='@tmux_room_state_at'
+TMUX_ROOM_OPTION_OWNER='@tmux_room_owner'
+TMUX_ROOM_OPTION_OWNER_ID='@tmux_room_owner_id'
 TMUX_ROOM_OPTION_NOTE='@tmux_room_note'
 TMUX_ROOM_OPTION_PINNED='@tmux_room_pinned'
 TMUX_ROOM_OPTION_PROTECTED='@tmux_room_protected'
@@ -72,6 +74,8 @@ Metadata options for --new and --metadata:
   --driver <name>                 Set the provider-neutral room driver
   --state <value>                 running, idle, needs_input, failed, completed,
                                   or ended
+  --owner <name>                 Set bot owner (trimmed, at most 64 characters)
+  --owner-id <id>                Set bot owner ID (requires --owner)
   --note <text>                   Set a short public note
   --pinned / --unpinned           Set the public pinned flag
   --protected / --unprotected     Set the termination protection flag
@@ -177,6 +181,8 @@ metadata_load() {
   metadata_state_updated_at=""
   metadata_state_age_seconds=""
   metadata_state_fresh=0
+  metadata_owner=""
+  metadata_owner_id=""
   metadata_note=""
   metadata_pinned=0
   metadata_protected=0
@@ -217,6 +223,13 @@ metadata_load() {
   if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_NOTE" 2>/dev/null); then
     clean=$(sanitize_text "$raw")
     metadata_note="${clean:0:500}"
+  fi
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_OWNER" 2>/dev/null); then
+    clean=$(sanitize_text "$raw")
+    metadata_owner="${clean:0:64}"
+  fi
+  if raw=$(tmux show-options -v -t "$session_id" "$TMUX_ROOM_OPTION_OWNER_ID" 2>/dev/null); then
+    [[ "$raw" =~ ^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$ ]] && metadata_owner_id="$raw"
   fi
   load_exact_tmux_option "$session_id" "$TMUX_ROOM_OPTION_PINNED"
   if [[ "$loaded_option_is_set" == "1" && -n "$loaded_option_value" && "$loaded_option_value" != "0" ]]; then
@@ -690,6 +703,8 @@ session_details() {
   {
     printf '  ROOM: \t%s [%s] · %s %s · #%s\n' "$display_name" "$status" "$windows" "$window_word" "$index"
     printf '    METADATA: \tdriver %s · state %s · pinned %s · protected %s\n' "$safe_driver" "$safe_state" "$pinned_label" "$protected_label"
+    [[ -n "$metadata_owner" ]] && printf '    OWNER: \t%s\n' "$metadata_owner"
+    [[ -n "$metadata_owner_id" ]] && printf '    OWNER ID: \t%s\n' "$metadata_owner_id"
     [[ -n "$safe_note" ]] && printf '    NOTE: \t%s\n' "$safe_note"
     printf '    AGENTS: \t%s\n' "$agent_summary"
     printf '    OPENED: \t%s · LAST ACTIVE: %s\n' "$opened" "$active"
@@ -943,6 +958,7 @@ prepare_local_view() {
   view_drivers=()
   view_states=()
   view_notes=()
+  view_owners=()
   view_pinned=()
   view_protected=()
   view_action_safe=()
@@ -983,6 +999,7 @@ prepare_local_view() {
     view_drivers+=("$(sanitize_text "$driver")")
     view_states+=("$(sanitize_text "$state")")
     view_notes+=("$(sanitize_text "$metadata_note")")
+    view_owners+=("$metadata_owner")
     view_pinned+=("$metadata_pinned")
     view_protected+=("$metadata_protected")
     view_action_safe+=("$action_safe")
@@ -1096,10 +1113,10 @@ render_view_table() {
       target="${view_names[index]}"
       selected_flag=0
       [[ "$i" == "$selected" ]] && selected_flag=1
-      printf 'R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf 'R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$((i + 1))" "$selected_flag" \
         "${view_pinned[index]}" "${view_devices[index]}" "$target" "${view_drivers[index]}" "${view_states[index]}" \
-        "${view_windows[index]}" "${view_activity[index]}" "${view_notes[index]}"
+        "${view_windows[index]}" "${view_activity[index]}" "${view_notes[index]}" "${view_owners[index]}"
     done
   } | TMUX_ROOM_RENDER_WIDTH="$width" TMUX_ROOM_RENDER_HEADER="$header" \
       TMUX_ROOM_RENDER_SUBHEADER="$subheader" TMUX_ROOM_RENDER_CONTROLS="$controls" \
@@ -1212,9 +1229,9 @@ for raw in sys.stdin:
     if len(fields) == 3 and fields[0] == "S":
         statuses.append((clean(fields[1]), clean(fields[2])))
         continue
-    if len(fields) != 11 or fields[0] != "R":
+    if len(fields) != 12 or fields[0] != "R":
         continue
-    _, number, selected, pinned, device, target, driver, state, windows, activity, note = fields
+    _, number, selected, pinned, device, target, driver, state, windows, activity, note, owner = fields
     try:
         stamp = int(activity)
     except ValueError:
@@ -1228,7 +1245,7 @@ for raw in sys.stdin:
         active = datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M") if stamp else "unknown"
     except (OverflowError, OSError, ValueError):
         active = "unknown"
-    rows.append((number, selected == "1", pin, clean(device), decorate(clean(target)), clean(driver), clean(state), clean(windows), active, clean(note)))
+    rows.append((number, selected == "1", pin, clean(device), decorate(clean(target)), clean(driver), clean(state), clean(windows), active, clean(note), clean(owner)))
 
 def server_label(device):
     low = device.casefold()
@@ -1247,7 +1264,7 @@ if statuses:
 
 if width < 64:
     line("#  SERVER  ROOM  ATTENTION")
-    for number, selected, pin, device, target, driver, state, windows, active, note in rows:
+    for number, selected, pin, device, target, driver, state, windows, active, note, owner in rows:
         prefix = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " "
         server_w = 8
         state_w = min(12, max(7, width // 3))
@@ -1255,6 +1272,8 @@ if width < 64:
         rendered = prefix + pad(server_label(device), server_w) + " " + pad(target, target_w) + " " + clip(state, state_w)
         rendered = clip(rendered, width)
         print(("\033[7m" + rendered + "\033[0m") if selected else rendered)
+        if owner:
+            line("     owner: " + owner)
 elif width < 110:
     active_w = 8
     server_w = 8
@@ -1267,13 +1286,15 @@ elif width < 110:
         heading += " " + pad("MODEL", driver_w)
     heading += " " + pad("ACTIVE", active_w)
     line(heading)
-    for number, selected, pin, device, target, driver, state, windows, active, note in rows:
+    for number, selected, pin, device, target, driver, state, windows, active, note, owner in rows:
         rendered = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " " + pad(server_label(device), server_w) + " " + pad(target, target_w) + " " + pad(state, state_w)
         if driver_w:
             rendered += " " + pad(driver, driver_w)
         rendered += " " + clip(active[5:16], active_w)
         rendered = clip(rendered, width)
         print(("\033[7m" + rendered + "\033[0m") if selected else rendered)
+        if owner:
+            line("     owner: " + owner)
 else:
     server_w = 8
     state_w = 13
@@ -1288,12 +1309,26 @@ else:
     if note_w:
         heading += " " + pad("NOTE", note_w)
     line(heading)
-    for number, selected, pin, device, target, driver, state, windows, active, note in rows:
+    for number, selected, pin, device, target, driver, state, windows, active, note, owner in rows:
         rendered = (">" if selected else " ") + number.rjust(2) + " " + (pin or " ") + " " + pad(server_label(device), server_w) + " " + pad(target, target_w) + " " + pad(driver, driver_w) + " " + pad(state, state_w) + " " + pad(windows, windows_w) + " " + pad(active, active_w)
+        owner_below = False
         if note_w:
-            rendered += " " + clip(note, note_w)
+            owner_label = "owner: " + owner if owner else ""
+            combined = note + (" | " if note and owner else "") + owner_label
+            if cell_width(combined) <= note_w:
+                rendered += " " + combined
+            elif note:
+                # Ownership must not reduce the room note that was visible before.
+                rendered += " " + clip(note, note_w)
+                owner_below = bool(owner)
+            else:
+                rendered += " " + clip(owner_label, note_w)
+        else:
+            owner_below = bool(owner)
         rendered = clip(rendered, width)
         print(("\033[7m" + rendered + "\033[0m") if selected else rendered)
+        if owner_below:
+            line("     owner: " + owner)
 
 if not rows:
     line("No rooms match this search." if query else "No rooms are available.")
@@ -1423,6 +1458,8 @@ PY
     TMUX_ROOM_JSON_STATE_UPDATED_AT="$metadata_state_updated_at" \
     TMUX_ROOM_JSON_STATE_AGE_SECONDS="$metadata_state_age_seconds" \
     TMUX_ROOM_JSON_STATE_FRESH="$metadata_state_fresh" \
+    TMUX_ROOM_JSON_OWNER="$metadata_owner" \
+    TMUX_ROOM_JSON_OWNER_ID="$metadata_owner_id" \
     TMUX_ROOM_JSON_NOTE="$metadata_note" \
     TMUX_ROOM_JSON_PINNED="$metadata_pinned" \
     TMUX_ROOM_JSON_PROTECTED="$metadata_protected" python3 - <<'PY'
@@ -1456,6 +1493,8 @@ room = {
         'state_updated_at': optional_integer('TMUX_ROOM_JSON_STATE_UPDATED_AT'),
         'state_age_seconds': optional_integer('TMUX_ROOM_JSON_STATE_AGE_SECONDS'),
         'fresh': os.environ.get('TMUX_ROOM_JSON_STATE_FRESH') == '1',
+        'owner': os.environ.get('TMUX_ROOM_JSON_OWNER', ''),
+        'owner_id': os.environ.get('TMUX_ROOM_JSON_OWNER_ID', ''),
         'note': os.environ.get('TMUX_ROOM_JSON_NOTE', ''),
         'pinned': os.environ.get('TMUX_ROOM_JSON_PINNED') == '1',
         'protected': os.environ.get('TMUX_ROOM_JSON_PROTECTED') == '1',
@@ -1567,6 +1606,10 @@ kill_local_room() {
 }
 
 parse_metadata_args() {
+  metadata_owner_mode="keep"
+  metadata_owner_value=""
+  metadata_owner_id_mode="keep"
+  metadata_owner_id_value=""
   metadata_arg_count=0
   metadata_driver_mode="keep"
   metadata_driver_value=""
@@ -1614,6 +1657,22 @@ parse_metadata_args() {
         metadata_arg_count=$((metadata_arg_count + 1))
         shift
         ;;
+      --owner)
+        (($# >= 2)) || { echo "--owner requires a value." >&2; return 2; }
+        metadata_owner_value=$(sanitize_text "$2" | python3 -c 'import sys; print(sys.stdin.read().strip(), end="")')
+        ((${#metadata_owner_value} <= 64)) || { echo "Invalid owner. Use at most 64 characters." >&2; return 2; }
+        metadata_owner_mode="set"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift 2
+        ;;
+      --owner-id)
+        (($# >= 2)) || { echo "--owner-id requires a value." >&2; return 2; }
+        [[ -z "$2" || "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$ ]] || { echo "Invalid owner ID. Use 1 to 64 letters, numbers, dots, underscores, colons, @, or hyphens, starting with a letter or number." >&2; return 2; }
+        metadata_owner_id_mode="set"
+        metadata_owner_id_value="$2"
+        metadata_arg_count=$((metadata_arg_count + 1))
+        shift 2
+        ;;
       --note)
         (($# >= 2)) || { echo "--note requires a value." >&2; return 2; }
         valid_metadata_text "$2" || { echo "Invalid note. Use at most 500 printable characters." >&2; return 2; }
@@ -1657,6 +1716,14 @@ parse_metadata_args() {
         ;;
     esac
   done
+  if [[ "$metadata_owner_id_mode" != "keep" && "$metadata_owner_mode" == "keep" ]]; then
+    echo "--owner-id requires --owner." >&2
+    return 2
+  fi
+  if [[ "$metadata_owner_mode" == "set" && -z "$metadata_owner_value" ]]; then
+    [[ -z "$metadata_owner_id_value" ]] || { echo "--owner-id requires a nonempty --owner." >&2; return 2; }
+    metadata_owner_id_mode="set"
+  fi
 }
 
 apply_metadata_option() {
@@ -1696,6 +1763,16 @@ apply_parsed_metadata() {
     transaction_modes+=("unset" "unset")
     transaction_options+=("$TMUX_ROOM_OPTION_STATE" "$TMUX_ROOM_OPTION_STATE_AT")
     transaction_values+=("" "")
+  fi
+  if [[ "$metadata_owner_mode" != "keep" ]]; then
+    transaction_modes+=("$metadata_owner_mode")
+    transaction_options+=("$TMUX_ROOM_OPTION_OWNER")
+    transaction_values+=("$metadata_owner_value")
+  fi
+  if [[ "$metadata_owner_id_mode" != "keep" ]]; then
+    transaction_modes+=("$metadata_owner_id_mode")
+    transaction_options+=("$TMUX_ROOM_OPTION_OWNER_ID")
+    transaction_values+=("$metadata_owner_id_value")
   fi
   if [[ "$metadata_note_mode" != "keep" ]]; then
     transaction_modes+=("$metadata_note_mode")
@@ -2604,7 +2681,7 @@ new_local_room() {
         start=1
         shift
         ;;
-      --driver|--state|--note)
+      --driver|--state|--note|--owner|--owner-id)
         (($# >= 2)) || { echo "$1 requires a value." >&2; return 2; }
         metadata_args+=("$1" "$2")
         shift 2
@@ -2617,6 +2694,10 @@ new_local_room() {
     esac
   done
   parse_metadata_args "${metadata_args[@]}" || return $?
+  if [[ "$metadata_owner_id_mode" == "set" && -z "$metadata_owner_id_value" ]]; then
+    echo "Invalid owner ID. --new requires a nonempty owner ID when specified." >&2
+    return 2
+  fi
   if [[ -n "$model" && -z "$agent" ]]; then
     echo "--model requires --agent." >&2
     return 2
@@ -2713,6 +2794,13 @@ update_local_metadata() {
     return 1
   fi
   session_id="$found_session_id"
+  if [[ "$metadata_owner_mode" == "set" && "$metadata_owner_id_mode" == "keep" ]]; then
+    metadata_load "$session_id"
+    if [[ "$metadata_owner_value" != "$metadata_owner" ]]; then
+      metadata_owner_id_mode="set"
+      metadata_owner_id_value=""
+    fi
+  fi
   apply_parsed_metadata "$session_id" "$room" || return $?
   metadata_load "$session_id"
   echo "Updated room metadata: $room ($session_id)"
@@ -3010,6 +3098,10 @@ for value in rooms:
     protected = metadata.get("protected", False)
     if not isinstance(fresh, bool) or not isinstance(pinned, bool) or not isinstance(protected, bool):
         fail("invalid metadata flag")
+    owner = public_text(metadata.get("owner", ""), "owner", 64)
+    owner_id = public_text(metadata.get("owner_id", ""), "owner_id", 64)
+    if owner_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}", owner_id):
+        fail("invalid owner ID")
     note = public_text(metadata.get("note", ""), "note", 500)
     normalized.append({
         "id": room_id,
@@ -3025,6 +3117,8 @@ for value in rooms:
             "state_updated_at": state_updated_at,
             "state_age_seconds": state_age_seconds,
             "fresh": fresh,
+            "owner": owner,
+            "owner_id": owner_id,
             "note": note,
             "pinned": pinned,
             "protected": protected,
@@ -3308,6 +3402,7 @@ load_fleet_view() {
   view_drivers=()
   view_states=()
   view_notes=()
+  view_owners=()
   view_pinned=()
   view_protected=()
   view_action_safe=()
@@ -3316,7 +3411,7 @@ load_fleet_view() {
   fleet_unavailable=0
   fleet_unavailable_names=()
   fleet_unavailable_statuses=()
-  while IFS="$fleet_record_sep" read -r kind a b c d e f g h i j k l; do
+  while IFS="$fleet_record_sep" read -r kind a b c d e f g h i j k l m; do
     case "$kind" in
       D)
         fleet_devices=$((fleet_devices + 1))
@@ -3341,7 +3436,8 @@ load_fleet_view() {
         view_drivers+=("$i")
         view_states+=("$j")
         view_notes+=("$k")
-        IFS='|' read -r a b c <<<"$l"
+        view_owners+=("$l")
+        IFS='|' read -r a b c <<<"$m"
         view_pinned+=("$a")
         view_protected+=("$b")
         view_action_safe+=("$c")
@@ -3376,7 +3472,7 @@ for device in document.get("devices", []):
         print(
             "R", name, source, room["id"], room["name"], room["windows"],
             int(room["attached"]), room["activity_at"], room["path"],
-            metadata["driver"], state, metadata["note"], flags, sep="\x1f"
+            metadata["driver"], state, metadata["note"], metadata["owner"], flags, sep="\x1f"
         )
 PY
   )

@@ -883,14 +883,32 @@ rm -f "$TMUX_STATE/renamed"
 
 : > "$TMUX_LOG"
 new_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_ROOM_DEVICE=devbox \
-  "$SCRIPT" --new gamma --cwd "$MOCK/workspace" --agent codex --state running --note "new workspace" --pinned)
+  "$SCRIPT" --new gamma --cwd "$MOCK/workspace" --agent codex --state running --note "new workspace" --pinned --owner $'  Bot\t One  ' --owner-id bot:one@dev)
 assert_contains "$new_output" "Created room: gamma (\$3)"
 assert_contains "$(<"$TMUX_LOG")" "new-session -d -P -F #{session_id} -s gamma -c $WORKSPACE_REAL codex"
 assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_driver codex"
 assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_state running"
 assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_state_at"
 assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_pinned 1"
+assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_owner Bot One"
+assert_contains "$(<"$TMUX_LOG")" "set-option -t $MOCK_ID_3 @tmux_room_owner_id bot:one@dev"
 rm -f "$TMUX_STATE/new-room"
+
+for invalid_owner_args in missing invalid long empty_id; do
+  : > "$TMUX_LOG"
+  case "$invalid_owner_args" in
+    empty_id) owner_args=(--owner Bot --owner-id "") ;;
+    missing) owner_args=(--owner-id bot) ;;
+    invalid) owner_args=(--owner Bot --owner-id 'bad/id') ;;
+    long) owner_args=(--owner "$(printf '%065d' 0)") ;;
+  esac
+  if owner_error=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" \
+    "$SCRIPT" --new owner-invalid "${owner_args[@]}" 2>&1); then
+    fail "invalid owner arguments succeeded"
+  fi
+  assert_contains "$owner_error" "owner"
+  assert_not_contains "$(<"$TMUX_LOG")" "new-session"
+done
 
 : > "$TMUX_LOG"
 new_rollback_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_MOCK_STATE_DIR="$TMUX_STATE" TMUX_SET_FAIL_OPTION='@tmux_room_driver' TMUX_ROOM_DEVICE=devbox \
@@ -1667,7 +1685,7 @@ assert_contains "$real_metadata_failure" "restored the previous metadata snapsho
 cmp "$REAL_NOTE_BEFORE" "$REAL_NOTE_AFTER" >/dev/null 2>&1 || fail "real metadata rollback lost the exact note value"
 
 real_metadata=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
-  "$SCRIPT" --metadata live-room --driver codex --state idle --note "real tmux" --protected)
+  "$SCRIPT" --metadata live-room --driver codex --state idle --note "real tmux" --protected --owner "Changed | Bot" --owner-id bot.changed)
 assert_contains "$real_metadata" "Updated room metadata: live-room"
 real_json=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
   "$SCRIPT" --json live-room)
@@ -1679,7 +1697,42 @@ assert room["metadata"]["driver"] == "codex"
 assert room["metadata"]["state"] == "idle"
 assert room["metadata"]["fresh"] is True
 assert room["metadata"]["protected"] is True
+assert room["metadata"]["owner"] == "Changed | Bot"
+assert room["metadata"]["owner_id"] == "bot.changed"
 '
+real_owner_inspect=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 "$SCRIPT" --inspect live-room)
+assert_contains "$real_owner_inspect" "Changed | Bot"
+# Reasserting an owner preserves its ID; changing the owner cannot retain an old ID.
+PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 "$SCRIPT" --metadata live-room --owner "Changed | Bot" >/dev/null
+[[ "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -v -t live-room @tmux_room_owner_id)" == "bot.changed" ]] || fail "unchanged owner lost its ID"
+PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 "$SCRIPT" --metadata live-room --owner "Replacement Bot" >/dev/null
+[[ "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -v -t live-room @tmux_room_owner)" == "Replacement Bot" ]] || fail "owner change was not stored"
+[[ -z "$("$REAL_TMUX_BIN" -L "$REAL_TMUX_SOCKET" show-options -v -t live-room @tmux_room_owner_id)" ]] || fail "owner change retained the old ID"
+PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 "$SCRIPT" --metadata live-room --owner "Changed | Bot" --owner-id bot.changed >/dev/null
+real_owner_list=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 COLUMNS=200 "$SCRIPT" --list)
+assert_contains "$real_owner_list" "owner: Changed | Bot"
+for owner_width in 40 80; do
+  compact_owner_list=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 TMUX_ROOM_COLUMNS="$owner_width" "$SCRIPT" --list)
+  assert_contains "$compact_owner_list" "owner: Changed | Bot"
+  assert_max_display_width "$compact_owner_list" "$owner_width"
+done
+long_owner="$(printf '%064d' 0)"
+PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 "$SCRIPT" --metadata live-room --owner "$long_owner" --note "NEED ACK" >/dev/null
+for owner_width in 40 80 110 120 200; do
+  long_owner_list=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 TMUX_ROOM_COLUMNS="$owner_width" "$SCRIPT" --list)
+  assert_contains "$long_owner_list" "owner: "
+  if ((owner_width >= 110)); then
+    assert_contains "$long_owner_list" "NEED ACK"
+  fi
+  if ((owner_width < 76)); then
+    assert_contains "$long_owner_list" "…"
+    assert_not_contains "$long_owner_list" "$long_owner"
+  fi
+  assert_max_display_width "$long_owner_list" "$owner_width"
+done
+PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 "$SCRIPT" --metadata live-room --owner "" --owner-id "" >/dev/null
+real_owner_clear=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 "$SCRIPT" --json live-room)
+printf '%s' "$real_owner_clear" | /usr/bin/python3 -c 'import json,sys; m=json.load(sys.stdin)["rooms"][0]["metadata"]; assert m["owner"] == m["owner_id"] == ""'
 
 real_rename=$(PATH="$REAL_BIN:/usr/bin:/bin" TMUX_REAL_BIN="$REAL_TMUX_BIN" TMUX_REAL_SOCKET="$REAL_TMUX_SOCKET" TMUX_ROOM_DISABLE_UPDATE_CHECK=1 \
   "$SCRIPT" --rename live-room renamed-room)
