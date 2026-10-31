@@ -49,7 +49,7 @@ Attach this room? [y/N]:
 
 Unknown agents and models are labeled honestly rather than guessed.
 
-The public room metadata contract also reports a declared driver, lifecycle state, note, pinned flag, and protected flag. These values are never inferred from terminal text.
+The public room metadata contract also reports a declared driver, bot owner and owner ID, lifecycle state, note, pinned flag, and protected flag. These values are never inferred from terminal text.
 
 ## Install
 
@@ -199,6 +199,8 @@ use the real room name, so `tmux-room natural-catch-pdp` keeps working unchanged
         "state_updated_at": 1784649300,
         "state_age_seconds": 300,
         "fresh": true,
+        "owner": "Review Bot",
+        "owner_id": "review-bot",
         "note": "Review requested",
         "pinned": true,
         "protected": false
@@ -254,6 +256,8 @@ The shared tmux options are:
 | Driver | `@tmux_room_driver` | `unknown` |
 | State | `@tmux_room_state` | `unknown` |
 | State timestamp | `@tmux_room_state_at` | no timestamp |
+| Owner | `@tmux_room_owner` | empty string |
+| Owner ID | `@tmux_room_owner_id` | empty string |
 | Note | `@tmux_room_note` | empty string |
 | Pinned | `@tmux_room_pinned` | `false` |
 | Protected | `@tmux_room_protected` | `false` |
@@ -295,6 +299,16 @@ tmux-room --new kh-review --cwd /code/knowledge-hub --agent grok --model grok-4.
 ```
 
 Allowed agent names are `claude`, `codex`, `grok`, `gemini`, `cursor`, and `hermes`. The command must exist on `PATH`. Arbitrary shell command text is not accepted. `--model` only accepts a token of letters, numbers, dots, underscores, colons, slashes, or hyphens. `--start` sends the hardcoded `/start` prompt. It does not accept custom prompt text. When `--agent` is omitted, tmux starts the user's normal shell. When `--driver` is omitted, an explicit `--agent` also becomes the public driver value.
+
+Declare a bot owner when creating a room:
+
+```bash
+tmux-room --new bot-review --owner "Review Bot" --owner-id review-bot
+tmux-room --metadata bot-review --owner "Release Bot" --owner-id release-bot
+tmux-room --metadata bot-review --owner "" --owner-id ""
+```
+
+Owner names have control characters removed and surrounding whitespace trimmed, then must be at most 64 characters. Owner IDs must match `[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}`. `--owner-id` requires `--owner` in the same command. Empty values clear ownership; clearing the owner also clears its ID. Changing an existing owner without `--owner-id` clears the previous ID; setting the same owner again preserves it. Owners appear in room details, JSON metadata (`owner` and `owner_id`), and the existing note space in wide lists. Narrower lists add an owner line only for owned rooms. Wide lists also use an owner line when needed to preserve the visible note. Long owner labels are truncated with an ellipsis to fit the terminal. Unowned rooms keep their existing layout.
 
 ## Launch wizard
 
