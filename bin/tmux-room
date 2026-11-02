@@ -105,6 +105,7 @@ Client registry:
   ~/.config/tmux-room/launch      Last client, agent, and per-client defaults
   ~/.config/tmux-room/favorites   Extra favorite ids or slugs, one per line
   ~/.config/tmux-room/emoji       Client/project emoji, "<prefix> <emoji>" per line
+  TMUX_ROOM_CODE_DIR              Extra git folders to offer (default: ~/code)
 
 Emoji map:
   Rooms are shown with the emoji of the client or project they belong to.
@@ -116,7 +117,6 @@ Emoji map:
 
   The emoji is display only. Attach, search, and --json always use the real
   room name.
-  TMUX_ROOM_CODE_DIR              Extra git folders to offer (default: ~/code)
 
 Cleanup options:
   --days <count>                  Minimum inactive age (default: 7)
@@ -2810,7 +2810,7 @@ update_local_metadata() {
 }
 
 cleanup_stale_rooms() {
-  local days=7 now cutoff name windows attached created activity session_id
+  local days=7 now cutoff name attached activity session_id
   local confirm final phrase i roots pid final_resource final_memory final_processes atomic_rc
   local current_identity expected_activity cleaned skipped
   local -a stale_names stale_ids stale_activities
@@ -2838,9 +2838,7 @@ cleanup_stale_rooms() {
   load_rows
   for i in "${!rows[@]}"; do
     name="${room_names[i]}"
-    windows="${room_windows[i]}"
     attached="${room_attached[i]}"
-    created="${room_created[i]}"
     activity="${room_activity[i]}"
     session_id="${room_ids[i]}"
     [[ "$attached" == "0" && "$activity" =~ ^[0-9]+$ ]] || continue
