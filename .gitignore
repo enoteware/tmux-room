@@ -1,0 +1,4 @@
+# Claude Code "don't ask again" persists exact Bash commands, including secrets.
+# https://about.gitlab.com/blog/prevent-leaks-from-claude-code-dont-ask-again-file/
+.claude/settings.local.json
+**/.claude/settings.local.json
