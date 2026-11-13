@@ -1,0 +1,192 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# Fleet-standard CodeRabbit config (enoteware / Noteware-Digital), 2026-10-20.
+# Copy to the repo root as .coderabbit.yaml, keep only the stack block(s) the
+# repo needs, then add repo-specific path_instructions (see path-instructions-library.yaml).
+#
+# Design goals: one reviewer that finds real bugs, little walkthrough noise, no
+# auto-generated follow-up PRs, rules come from AGENTS.md (shared with Codex).
+#
+# Commands: @coderabbitai review | full review | pause | resume | resolve | configuration
+
+language: en-US
+# Max 250 chars.
+tone_instructions: >-
+  Be terse. Lead with the concrete failure mode, then the fix. Mark each finding
+  blocker or follow-up. No praise, no restating the diff, no emoji.
+# Inherit anything not set here from the Organization UI settings (set the org
+# UI to this same baseline so repos without a file behave the same way).
+inheritance: true
+
+reviews:
+  # chill = balanced. assertive (the current Organization UI default) is nitpicky
+  # and multiplies thread count for bots to triage. Use quiet for docs-only repos.
+  profile: chill
+  # No branch protection exists on most repos, so this would only add noise.
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true   # keep the PR description the bot's own
+  review_status: true
+  review_details: false
+  commit_status: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  # Walkthrough noise off.
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  assess_linked_issues: true
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false      # solo maintainer
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: true   # ship skill uses the "Prompt for AI Agents" block
+  abort_on_close: true
+
+  auto_review:
+    enabled: true
+    drafts: false                  # matches Codex, which also skips drafts
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+    ignore_title_keywords:
+      - "[skip review]"
+      - "WIP"
+    labels:
+      - "!skip-review"
+    # Dependabot is already skipped as a bot user; listed for clarity.
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "renovate[bot]"
+
+  # Generated / vendored / binary content never gets reviewed. Never exclude
+  # migrations, workflows, or env examples.
+  path_filters:
+    - "!**/package-lock.json"
+    - "!**/pnpm-lock.yaml"
+    - "!**/yarn.lock"
+    - "!**/bun.lockb"
+    - "!**/composer.lock"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/.next/**"
+    - "!**/.vercel/**"
+    - "!**/node_modules/**"
+    - "!**/vendor/**"
+    - "!**/coverage/**"
+    - "!**/playwright-report/**"
+    - "!**/test-results/**"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+    - "!**/*.map"
+    - "!**/*.snap"
+    - "!**/generated/**"
+    - "!**/__generated__/**"
+    - "!**/*.{png,jpg,jpeg,gif,webp,avif,ico,pdf,zip,mp4,mov,glb,psd,ai}"
+    - "!.next-docs/**"
+    - "!.design-sync/**"
+
+  # Fleet-wide rules that apply in every repo. Repo-specific rules go below these.
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        Report a blocker only for a concrete failure this PR introduces: security,
+        credential exposure, auth or tenant-scope bypass, data loss, destructive or
+        incorrect behavior, broken compatibility, or an unmet acceptance criterion
+        in the PR description. Name the path and the failure mode. Everything else
+        (style, naming, optional hardening, refactors, pre-existing issues) is a
+        follow-up and must say so. Any literal secret, token, API key, password,
+        private key, or connection string is always a blocker, including in docs,
+        tests, examples, and scripts.
+    - path: "**/{.env*,*.env,**/env*.ts,**/config/**}"
+      instructions: >-
+        Secrets must come from the environment or the secret manager, never from
+        the repo. Flag any server secret exposed through NEXT_PUBLIC_*, a client
+        bundle, a log line, or an error response.
+    - path: ".github/workflows/**"
+      instructions: >-
+        Flag pull_request_target with checkout of the PR head, secrets passed to
+        untrusted code, unpinned third-party actions on deploy jobs, and
+        permissions broader than needed.
+    # Repo-specific
+    - path: "{bin/**,tests/**,install.sh,**/*.sh}"
+      instructions: >-
+        Must run on macOS bash 3.2 and Linux. Flag bash-4-only syntax
+        (associative arrays, mapfile, ${var,,}), GNU-only flags, unguarded
+        timeout, rm -rf on a variable that can be empty, and force-push or
+        destructive git commands.
+
+  finishing_touches:
+    # These open extra PRs or commits. Keep them on-demand only.
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+    autofix:
+      enabled: true               # used by the ship skill, on demand only
+    fix_ci:
+      enabled: true
+    resolve_merge_conflict:
+      enabled: true
+
+  pre_merge_checks:
+    title:
+      mode: "off"
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning
+    docstrings:
+      mode: "off"
+    custom_checks:
+      - name: "No secrets in diff"
+        mode: error
+        instructions: >-
+          Fail if the diff adds any credential, API key, token, password, private
+          key, webhook secret, or database URL with a password. Placeholders like
+          <YOUR_KEY> or values read from process.env pass.
+
+  tools:
+    # Security / secrets (all stacks)
+    gitleaks: { enabled: true }
+    trufflehog: { enabled: true }
+    semgrep: { enabled: true }
+    opengrep: { enabled: false }   # overlaps semgrep
+    osvScanner: { enabled: true }
+    actionlint: { enabled: true }
+    zizmor: { enabled: true }
+    shellcheck: { enabled: true }
+    dotenvLint: { enabled: true }
+    # Noise reducers
+    languagetool: { enabled: false }
+    markdownlint: { enabled: false }
+    yamllint: { enabled: true }
+
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    # Same files Codex reads, so both reviewers enforce one rulebook.
+    # Defaults already include **/AGENTS.md and **/CLAUDE.md; listed for clarity.
+    filePatterns:
+      - "AGENTS.md"
+      - "**/AGENTS.md"
+      - "CLAUDE.md"
+      - "**/CLAUDE.md"
+      - "docs/CODE_REVIEW.md"
+      # Optional fleet rulebook (needs verification that cross-repo reads work
+      # on a personal account; documented for organization repos):
+      # - "enoteware/brain:shared/review/REVIEW-STANDARD.md"
+  learnings:
+    scope: auto
+  pull_requests:
+    scope: auto
+
+chat:
+  auto_reply: true
+  art: false
