@@ -13,9 +13,9 @@ DEVICE: mini [local]
 STATUS: CPU 12% load (0.96/8) · RAM 44% (13.9/31.3 GB)
 / search | c clear | arrows move | Enter inspect/attach | x close | q quit
 
-#  P ROOM                       DRIVER               ATTENTION     WIN LAST ACTIVE      NOTE
- 1  * kh-review                  codex                !needs_input    2 2026-07-20 01:42 Review requested
- 2    release-check              claude-fable5-low    detached        1 2026-07-20 00:18
+#  P SERVER   ROOM                             MODEL              ATTENTION     WIN LAST ACTIVE      NOTE
+  1 * 🍎 mini  kh-review                        codex              !needs_input  2   2026-07-20 01:42 Review requested
+  2   🍎 mini  release-check                    claude-fable5-low  detached      1   2026-07-20 00:18
 ```
 
 Select a room in the interactive picker to reveal its full detail card before attaching:

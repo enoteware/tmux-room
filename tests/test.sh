@@ -1509,6 +1509,14 @@ fleet_escape_output=$(printf '\033q' | PATH="$MOCK:/usr/bin:/bin" TMUX_ROOM_FORC
 assert_not_contains "$fleet_escape_output" "ROOM DETAILS"
 
 : > "$TMUX_LOG"
+for invalid_days in 0 36501 abc; do
+  invalid_days_output=$(PATH="$MOCK:/usr/bin:/bin" TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox \
+    "$SCRIPT" --cleanup-stale --days "$invalid_days" 2>&1 || true)
+  assert_contains "$invalid_days_output" "--days must be between 1 and 36500"
+done
+assert_not_contains "$(<"$TMUX_LOG")" "kill-session"
+
+: > "$TMUX_LOG"
 cleanup_cancel_output=$(printf 'NO\n' | PATH="$MOCK:/usr/bin:/bin" TMUX_TWO_ROOMS=1 TMUX_MOCK_LOG="$TMUX_LOG" TMUX_ROOM_DEVICE=devbox "$SCRIPT" --cleanup-stale --days 7)
 assert_contains "$cleanup_cancel_output" "STALE ROOM REVIEW"
 assert_contains "$cleanup_cancel_output" "beta"
